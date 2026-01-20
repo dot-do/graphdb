@@ -1,0 +1,92 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "graphdb",
+  "main": "src/index.ts",
+
+  // Modern compatibility settings for 2026
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat_v2"],
+
+  // Production routes for workers.do enterprise zone
+  "routes": [
+    {
+      "pattern": "graphdb.workers.do/*",
+      "zone_name": "workers.do"
+    }
+  ],
+
+  // Durable Objects bindings
+  "durable_objects": {
+    "bindings": [
+      {
+        // Broker DO: Hibernating WebSocket, capnweb RPC (95% cost discount)
+        "name": "BROKER",
+        "class_name": "BrokerDO"
+      },
+      {
+        // Shard DO: SQLite triples with typed object columns
+        "name": "SHARD",
+        "class_name": "ShardDO"
+      },
+      {
+        // Coordinator DO: Query planning and shard coordination
+        "name": "COORDINATOR",
+        "class_name": "CoordinatorDO"
+      },
+      {
+        // CDC Coordinator DO: CDC pipeline coordination for shards
+        "name": "CDC_COORDINATOR",
+        "class_name": "CDCCoordinatorDO"
+      },
+      {
+        // Traversal DO: Region-optimized graph traversal using colo.do + capnweb
+        "name": "TRAVERSAL_DO",
+        "class_name": "TraversalDO"
+      }
+    ]
+  },
+
+  // Migrations for Durable Objects
+  "migrations": [
+    {
+      "tag": "v1",
+      // SQLite-backed Durable Objects for persistent storage
+      "new_sqlite_classes": ["ShardDO", "CoordinatorDO"],
+      // Standard (non-SQLite) Durable Objects
+      "new_classes": ["BrokerDO"]
+    },
+    {
+      "tag": "v2",
+      // TraversalDO for region-optimized graph traversal
+      "new_classes": ["TraversalDO"]
+    },
+    {
+      "tag": "v3",
+      // CDCCoordinatorDO for CDC pipeline coordination
+      "new_classes": ["CDCCoordinatorDO"]
+    }
+  ],
+
+  // R2 Bucket for lakehouse storage (CDC streaming, GraphCol format)
+  // Production bucket: graphdb-lakehouse-prod
+  "r2_buckets": [
+    {
+      "binding": "LAKEHOUSE",
+      "bucket_name": "graphdb-lakehouse-prod"
+    }
+  ],
+
+  // KV namespace for edge cache metadata
+  // Production namespace ID (workers.do zone)
+  "kv_namespaces": [
+    {
+      "binding": "CACHE_META",
+      "id": "82732cf0700d4a16838519203a3cc25e"
+    }
+  ],
+
+  // Observability for production metrics
+  "observability": {
+    "enabled": true
+  }
+}

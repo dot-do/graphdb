@@ -1,0 +1,31 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "onet-graph",
+  "main": "onet-loader.ts",
+
+  // Route configuration
+  "routes": [
+    {
+      "pattern": "onet-graph.workers.do/*",
+      "zone_name": "workers.do"
+    }
+  ],
+
+  // Modern compatibility settings
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat_v2"],
+
+  // R2 Bucket for lakehouse storage
+  "r2_buckets": [
+    {
+      "binding": "LAKEHOUSE",
+      "bucket_name": "graphdb-lakehouse-prod"
+    }
+  ],
+
+  // Increase limits for data loading
+  "limits": {
+    // Allow up to 5 minute execution for full load (max allowed)
+    "cpu_ms": 300000
+  }
+}

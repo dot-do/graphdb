@@ -1,0 +1,137 @@
+{
+  "name": "@dotdo/graphdb",
+  "version": "0.1.0",
+  "description": "Cost-optimized graph database for Cloudflare Workers",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./snippet": {
+      "types": "./dist/snippet/index.d.ts",
+      "import": "./dist/snippet/index.js"
+    },
+    "./broker": {
+      "types": "./dist/broker/index.d.ts",
+      "import": "./dist/broker/index.js"
+    },
+    "./shard": {
+      "types": "./dist/shard/index.d.ts",
+      "import": "./dist/shard/index.js"
+    },
+    "./coordinator": {
+      "types": "./dist/coordinator/index.d.ts",
+      "import": "./dist/coordinator/index.js"
+    },
+    "./traversal": {
+      "types": "./dist/traversal/index.d.ts",
+      "import": "./dist/traversal/index.js"
+    },
+    "./query": {
+      "types": "./dist/query/index.d.ts",
+      "import": "./dist/query/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage/index.d.ts",
+      "import": "./dist/storage/index.js"
+    },
+    "./index": {
+      "types": "./dist/index/index.d.ts",
+      "import": "./dist/index/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc/index.d.ts",
+      "import": "./dist/rpc/index.js"
+    },
+    "./cache": {
+      "types": "./dist/cache/index.d.ts",
+      "import": "./dist/cache/index.js"
+    },
+    "./import": {
+      "types": "./dist/import/index.d.ts",
+      "import": "./dist/import/index.js"
+    },
+    "./security": {
+      "types": "./dist/security/index.d.ts",
+      "import": "./dist/security/index.js"
+    },
+    "./benchmark": {
+      "types": "./dist/benchmark/index.d.ts",
+      "import": "./dist/benchmark/index.js"
+    },
+    "./errors": {
+      "types": "./dist/errors/index.d.ts",
+      "import": "./dist/errors/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "graphdb",
+    "graph-database",
+    "cloudflare",
+    "cloudflare-workers",
+    "workers",
+    "durable-objects",
+    "graph",
+    "triples",
+    "rdf",
+    "knowledge-graph",
+    "edge-computing",
+    "serverless"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dot-do/pocs.git",
+    "directory": "packages/graphdb"
+  },
+  "sideEffects": false,
+  "bugs": {
+    "url": "https://github.com/dot-do/pocs/issues"
+  },
+  "homepage": "https://github.com/dot-do/pocs/tree/main/packages/graphdb",
+  "author": "Dot Do <hello@dot.do>",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "capnweb": "^0.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.0.0"
+  }
+}

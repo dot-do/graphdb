@@ -1,0 +1,59 @@
+# IMDB Data Loader Worker Configuration
+#
+# Streams IMDB datasets directly to R2 as GraphCol chunks.
+#
+# Usage:
+#   wrangler dev scripts/loaders/imdb-loader.ts -c scripts/loaders/wrangler.toml
+#
+# Endpoints:
+#   GET /load - Load all IMDB datasets
+#   GET /load/title-basics - Load title.basics.tsv.gz only
+#   GET /load/title-ratings - Load title.ratings.tsv.gz only
+#   GET /load/name-basics - Load name.basics.tsv.gz only
+#   GET /load/title-principals - Load title.principals.tsv.gz only
+#   GET /status - Get current manifest status
+
+name = "imdb-loader"
+main = "imdb-loader.ts"
+
+# Modern compatibility settings
+compatibility_date = "2026-01-20"
+compatibility_flags = ["nodejs_compat_v2"]
+
+# R2 bucket binding for lakehouse storage
+[[r2_buckets]]
+binding = "LAKEHOUSE"
+bucket_name = "graphdb-lakehouse-prod"
+
+# Increase CPU time limit for large data loads
+# Note: This requires a Workers Paid plan for production
+[limits]
+cpu_ms = 300000  # 5 minutes CPU time
+
+# Worker logging
+[observability]
+enabled = true
+
+# Development-specific overrides
+[env.dev]
+name = "imdb-loader-dev"
+
+[[env.dev.r2_buckets]]
+binding = "LAKEHOUSE"
+bucket_name = "graphdb-lakehouse-dev"
+
+# Staging environment
+[env.staging]
+name = "imdb-loader-staging"
+
+[[env.staging.r2_buckets]]
+binding = "LAKEHOUSE"
+bucket_name = "graphdb-lakehouse-staging"
+
+# Production environment
+[env.production]
+name = "imdb-loader"
+
+[[env.production.r2_buckets]]
+binding = "LAKEHOUSE"
+bucket_name = "graphdb-lakehouse-prod"

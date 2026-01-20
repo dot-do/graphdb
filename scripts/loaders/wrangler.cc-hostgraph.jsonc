@@ -1,0 +1,61 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cc-graph",
+  "main": "cc-hostgraph-loader.ts",
+
+  // Custom domain routing
+  "routes": [
+    {
+      "pattern": "cc-graph.workers.do/*",
+      "zone_name": "workers.do"
+    }
+  ],
+
+  // Modern compatibility settings
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat_v2"],
+
+  // R2 Bucket for lakehouse storage
+  "r2_buckets": [
+    {
+      "binding": "LAKEHOUSE",
+      "bucket_name": "graphdb-lakehouse-prod"
+    }
+  ],
+
+  // Increase limits for large data loading
+  // Common Crawl host graph is massive - even 1M hosts takes significant time
+  "limits": {
+    // Allow max 5 minute execution (Cloudflare limit is 300s)
+    // Full graph would require queue-based processing
+    "cpu_ms": 300000
+  },
+
+  // Environment-specific overrides
+  "env": {
+    "preview": {
+      "r2_buckets": [
+        {
+          "binding": "LAKEHOUSE",
+          "bucket_name": "graphdb-lakehouse-preview"
+        }
+      ],
+      // Shorter timeout for preview testing
+      "limits": {
+        "cpu_ms": 120000
+      }
+    },
+    "dev": {
+      "r2_buckets": [
+        {
+          "binding": "LAKEHOUSE",
+          "bucket_name": "graphdb-lakehouse-dev"
+        }
+      ],
+      // Even shorter for local dev
+      "limits": {
+        "cpu_ms": 60000
+      }
+    }
+  }
+}

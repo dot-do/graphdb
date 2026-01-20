@@ -1,0 +1,72 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "wikidata-graph",
+  "main": "wikidata-loader.ts",
+
+  // Route configuration for workers.do
+  "routes": [
+    {
+      "pattern": "wikidata-graph.workers.do/*",
+      "zone_name": "workers.do"
+    }
+  ],
+
+  // Modern compatibility settings
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat_v2"],
+
+  // R2 Bucket for lakehouse storage
+  "r2_buckets": [
+    {
+      "binding": "LAKEHOUSE",
+      "bucket_name": "graphdb-lakehouse-prod"
+    }
+  ],
+
+  // Increase limits for data loading
+  // Wikidata SPARQL endpoint has rate limits, so we need extended CPU time
+  "limits": {
+    // Allow up to 5 minute execution for full load (max allowed is 300000ms)
+    "cpu_ms": 300000
+  },
+
+  // Observability for monitoring progress
+  "observability": {
+    "enabled": true
+  },
+
+  // Development environment
+  "env": {
+    "dev": {
+      "name": "wikidata-loader-dev",
+      "r2_buckets": [
+        {
+          "binding": "LAKEHOUSE",
+          "bucket_name": "graphdb-lakehouse-dev"
+        }
+      ]
+    },
+
+    // Staging environment
+    "staging": {
+      "name": "wikidata-loader-staging",
+      "r2_buckets": [
+        {
+          "binding": "LAKEHOUSE",
+          "bucket_name": "graphdb-lakehouse-staging"
+        }
+      ]
+    },
+
+    // Production environment
+    "production": {
+      "name": "wikidata-loader",
+      "r2_buckets": [
+        {
+          "binding": "LAKEHOUSE",
+          "bucket_name": "graphdb-lakehouse-prod"
+        }
+      ]
+    }
+  }
+}

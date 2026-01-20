@@ -1,0 +1,55 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "wiktionary-graph",
+  "main": "wiktionary-loader.ts",
+
+  // Route configuration for workers.do
+  "routes": [
+    {
+      "pattern": "wiktionary-graph.workers.do/*",
+      "zone_name": "workers.do"
+    }
+  ],
+
+  // Modern compatibility settings
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat_v2"],
+
+  // R2 Bucket for lakehouse storage
+  "r2_buckets": [
+    {
+      "binding": "LAKEHOUSE",
+      "bucket_name": "graphdb-lakehouse-prod"
+    }
+  ],
+
+  // Durable Object for state persistence during chunked loading
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WIKTIONARY_LOADER",
+        "class_name": "WiktionaryLoaderDO"
+      }
+    ]
+  },
+
+  // Migrations for Durable Object
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["WiktionaryLoaderDO"]
+    }
+  ],
+
+  // Increase limits for data loading
+  // The Wiktionary JSON is ~2.6GB, but now processed in chunks
+  "limits": {
+    // Allow up to 5 minute execution for auto-load (max allowed)
+    "cpu_ms": 300000
+  },
+
+  // Observability for monitoring load progress
+  "observability": {
+    "enabled": true
+  }
+}
