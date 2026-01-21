@@ -25,7 +25,7 @@ import {
   type R2WriterConfig,
 } from '../../src/storage/r2-writer';
 import { encodeGraphCol, decodeGraphCol } from '../../src/storage/graphcol';
-import { type CDCEvent } from '../../src/shard/triggers';
+import { type CDCEvent } from '../../src/storage/cdc-types';
 import {
   ObjectType,
   createEntityId,

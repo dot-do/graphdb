@@ -47,7 +47,7 @@ export const GEO_INDEX_SCHEMA = `
 -- so we check in code before running this
 
 -- Index on geohash for prefix queries (only for GEO_POINT type)
-CREATE INDEX IF NOT EXISTS idx_geohash ON triples(geohash) WHERE obj_type = 13;
+CREATE INDEX IF NOT EXISTS idx_geohash ON triples(geohash) WHERE obj_type = ${ObjectType.GEO_POINT};
 `;
 
 // ============================================================================
@@ -119,7 +119,7 @@ export function initializeGeoIndex(sql: SqlStorage): void {
   }
 
   // Create index (IF NOT EXISTS handles idempotency)
-  sql.exec('CREATE INDEX IF NOT EXISTS idx_geohash ON triples(geohash) WHERE obj_type = 13');
+  sql.exec(`CREATE INDEX IF NOT EXISTS idx_geohash ON triples(geohash) WHERE obj_type = ${ObjectType.GEO_POINT}`);
 
   // Backfill geohash for existing GEO_POINT triples that don't have it
   backfillGeohash(sql);

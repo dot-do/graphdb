@@ -18,7 +18,7 @@ import {
   type R2WriterConfig,
   type R2WriterErrorEvent,
 } from '../../src/storage/r2-writer';
-import { type CDCEvent } from '../../src/shard/triggers';
+import { type CDCEvent } from '../../src/storage/cdc-types';
 import {
   ObjectType,
   createEntityId,

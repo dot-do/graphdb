@@ -5,13 +5,18 @@
  * If an entity definitely doesn't exist, return 404 immediately.
  * If entity might exist, pass through to origin.
  *
- * Constraints:
- * - 32KB max script size
+ * IMPORTANT: Cloudflare Snippets Constraints
+ * ------------------------------------------
+ * - 32KB max script size (STRICTLY ENFORCED - see npm run check:snippet-size)
  * - 5ms max compute time
  * - 32MB max memory
  * - No Node.js APIs - pure JS only
  *
- * This implementation: ~3KB minified
+ * Size Budget: This script must stay under 32KB when bundled/minified.
+ * Run `npm run check:snippet-size` to verify compliance before deployment.
+ * CI will fail if the bundled size exceeds 32KB.
+ *
+ * This implementation: ~1.6KB minified (~5% of budget)
  */
 
 // Bloom filter configuration - injected at build time

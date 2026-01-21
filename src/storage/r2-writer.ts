@@ -10,7 +10,7 @@
  * @packageDocumentation
  */
 
-import type { CDCEvent } from '../shard/triggers';
+import type { CDCEvent } from './cdc-types';
 import type { Namespace } from '../core/types';
 import type { Triple } from '../core/triple';
 import { encodeGraphCol, decodeGraphCol } from './graphcol';

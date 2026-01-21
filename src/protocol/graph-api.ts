@@ -299,6 +299,35 @@ export interface GraphAPI {
 // ============================================================================
 
 /**
+ * Mode for GraphAPITarget operation.
+ *
+ * - 'production': All operations delegate to shard layer. In-memory store is disabled.
+ *                 Requires getShardStub to be provided.
+ * - 'test': Uses in-memory store for isolated testing. Does not require shard layer.
+ *
+ * IMPORTANT: 'test' mode should NEVER be used in production deployments.
+ */
+export type GraphAPIMode = 'production' | 'test';
+
+/**
+ * Options for GraphAPITarget constructor.
+ */
+export interface GraphAPITargetOptions {
+  /**
+   * Callback to get a shard stub by ID.
+   * Required in production mode; optional in test mode.
+   */
+  getShardStub?: (shardId: string) => DurableObjectStub;
+
+  /**
+   * Operation mode.
+   * - 'production' (default): Delegates to shard layer, requires getShardStub.
+   * - 'test': Uses in-memory store for testing only.
+   */
+  mode?: GraphAPIMode;
+}
+
+/**
  * GraphAPITarget - capnweb RpcTarget implementation of GraphAPI.
  *
  * This class extends RpcTarget to expose methods via capnweb RPC.
@@ -308,36 +337,95 @@ export interface GraphAPI {
  * Designed to run inside a Durable Object with hibernation support.
  * Each wake from hibernation gets a fresh 1000 subrequest quota.
  *
+ * IMPORTANT: In production mode, all operations delegate to the shard layer.
+ * The in-memory store is ONLY available in 'test' mode for isolated testing.
+ *
  * @example
  * ```typescript
- * // In a Durable Object
+ * // In a Durable Object (production)
  * export class BrokerDO {
  *   private api: GraphAPITarget;
  *
  *   constructor(ctx: DurableObjectState) {
- *     this.api = new GraphAPITarget((shardId) => {
- *       return ctx.env.SHARD.get(ctx.env.SHARD.idFromName(shardId));
+ *     this.api = new GraphAPITarget({
+ *       getShardStub: (shardId) => ctx.env.SHARD.get(ctx.env.SHARD.idFromName(shardId)),
+ *       mode: 'production'  // default, can be omitted
  *     });
  *   }
  * }
+ *
+ * // For tests only
+ * const testApi = new GraphAPITarget({ mode: 'test' });
  * ```
  */
 export class GraphAPITarget extends RpcTarget implements GraphAPI {
-  /** In-memory entity store (for spike validation) */
+  /** In-memory entity store (ONLY available in test mode) */
   #entities: Map<string, Entity> = new Map();
 
-  /** In-memory triple store */
+  /** In-memory triple store (ONLY available in test mode) */
   #triples: ProtocolTriple[] = [];
 
-  /** Transaction counter */
+  /** Transaction counter (ONLY used in test mode) */
   #txCounter = 0;
 
-  /** Optional callback to get shard stub for orchestrator integration */
-  #getShardStub?: (shardId: string) => DurableObjectStub;
+  /** Callback to get shard stub for orchestrator integration */
+  #getShardStub: ((shardId: string) => DurableObjectStub) | undefined;
 
-  constructor(getShardStub?: (shardId: string) => DurableObjectStub) {
+  /** Operation mode: 'production' delegates to shards, 'test' uses in-memory store */
+  #mode: GraphAPIMode;
+
+  /**
+   * Create a new GraphAPITarget.
+   *
+   * @param options - Configuration options or legacy getShardStub callback
+   *
+   * For backwards compatibility, accepts either:
+   * - GraphAPITargetOptions object (recommended)
+   * - A function (shardId) => DurableObjectStub (legacy, treated as production mode)
+   */
+  constructor(options?: GraphAPITargetOptions | ((shardId: string) => DurableObjectStub)) {
     super();
-    this.#getShardStub = getShardStub!;
+
+    // Handle legacy function signature for backwards compatibility
+    if (typeof options === 'function') {
+      this.#getShardStub = options;
+      this.#mode = 'production';
+    } else if (options) {
+      this.#getShardStub = options.getShardStub;
+      this.#mode = options.mode ?? 'production';
+    } else {
+      // No options provided - default to production mode
+      // This will cause errors when trying to use methods, which is intentional
+      this.#mode = 'production';
+    }
+
+    // Validate configuration
+    if (this.#mode === 'production' && !this.#getShardStub) {
+      // Allow construction without shard stub for lazy initialization,
+      // but operations will fail at runtime if shard stub is not available
+    }
+  }
+
+  /**
+   * Check if in-memory store operations are allowed.
+   * Throws an error if in production mode without shard stub.
+   */
+  #requireTestModeOrShardStub(operation: string): void {
+    if (this.#mode === 'production' && !this.#getShardStub) {
+      throw new Error(
+        `GraphAPI operation "${operation}" requires either:\n` +
+        `  1. A shard stub getter in production mode, OR\n` +
+        `  2. Test mode enabled ({ mode: 'test' })\n` +
+        `Current mode: ${this.#mode}, hasShardStub: ${!!this.#getShardStub}`
+      );
+    }
+  }
+
+  /**
+   * Check if we should use the in-memory store (test mode only).
+   */
+  #useInMemoryStore(): boolean {
+    return this.#mode === 'test';
   }
 
   // --------------------------------------------------------------------------
@@ -347,6 +435,17 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
   async getEntity(id: string): Promise<Entity | null> {
     // Validate entity ID before processing
     validateEntityId(id);
+
+    // In production mode, delegate to shard layer
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('getEntity');
+      // Use orchestrator to get entity from shard
+      const plan = planQuery(`MATCH (n {$id: "${id}"}) RETURN n`);
+      const result = await orchestrateQuery(plan, this.#getShardStub!);
+      return result.entities[0] ?? null;
+    }
+
+    // Test mode: use in-memory store
     return this.#entities.get(id) ?? null;
   }
 
@@ -366,6 +465,27 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     // Validate entity ID before processing
     validateEntityId(idStr);
 
+    // In production mode, delegate to shard layer
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('createEntity');
+      // Route to appropriate shard and create entity
+      const shardId = this.#getShardIdForEntity(idStr);
+      const shardStub = this.#getShardStub!(shardId);
+      const response = await shardStub.fetch(
+        new Request('https://shard-do/entity', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(entity),
+        })
+      );
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Entity creation failed: ${error}`);
+      }
+      return;
+    }
+
+    // Test mode: use in-memory store
     if (this.#entities.has(idStr)) {
       throw new Error(
         `Entity creation failed: entity with ID "${idStr}" already exists. ` +
@@ -415,6 +535,27 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     // Validate entity ID before processing
     validateEntityId(id);
 
+    // In production mode, delegate to shard layer
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('updateEntity');
+      // Route to appropriate shard and update entity
+      const shardId = this.#getShardIdForEntity(id);
+      const shardStub = this.#getShardStub!(shardId);
+      const response = await shardStub.fetch(
+        new Request(`https://shard-do/entity/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(props),
+        })
+      );
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Entity update failed: ${error}`);
+      }
+      return;
+    }
+
+    // Test mode: use in-memory store
     const entity = this.#entities.get(id);
     if (!entity) {
       throw new Error(
@@ -449,6 +590,25 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     // Validate entity ID before processing
     validateEntityId(id);
 
+    // In production mode, delegate to shard layer
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('deleteEntity');
+      // Route to appropriate shard and delete entity
+      const shardId = this.#getShardIdForEntity(id);
+      const shardStub = this.#getShardStub!(shardId);
+      const response = await shardStub.fetch(
+        new Request(`https://shard-do/entity/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        })
+      );
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Entity deletion failed: ${error}`);
+      }
+      return;
+    }
+
+    // Test mode: use in-memory store
     if (!this.#entities.has(id)) {
       throw new Error(
         `Entity deletion failed: entity with ID "${id}" not found. ` +
@@ -477,6 +637,23 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     validateEntityId(startId);
 
     const limit = options?.limit ?? 100;
+
+    // In production mode, delegate to shard layer via orchestrator
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('traverse');
+      // Build Cypher-like query for traversal
+      const query = `MATCH (n {$id: "${startId}"})-[:${predicate}]->(m) RETURN m`;
+      const plan = planQuery(query);
+      const result = await orchestrateQuery(plan, this.#getShardStub!, { limit });
+
+      // Apply filter if provided (orchestrator may not support all filters)
+      if (options?.filter) {
+        return result.entities.filter(e => this.#matchesFilter(e, options.filter!));
+      }
+      return result.entities;
+    }
+
+    // Test mode: use in-memory store
     const results: Entity[] = [];
 
     // Find all triples matching subject and predicate
@@ -510,6 +687,23 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     validateEntityId(targetId);
 
     const limit = options?.limit ?? 100;
+
+    // In production mode, delegate to shard layer via orchestrator
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('reverseTraverse');
+      // Build Cypher-like query for reverse traversal
+      const query = `MATCH (n)-[:${predicate}]->(m {$id: "${targetId}"}) RETURN n`;
+      const plan = planQuery(query);
+      const result = await orchestrateQuery(plan, this.#getShardStub!, { limit });
+
+      // Apply filter if provided
+      if (options?.filter) {
+        return result.entities.filter(e => this.#matchesFilter(e, options.filter!));
+      }
+      return result.entities;
+    }
+
+    // Test mode: use in-memory store
     const results: Entity[] = [];
 
     // Find all triples pointing to target
@@ -541,13 +735,40 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     // Validate entity ID before processing
     validateEntityId(startId);
 
+    const limit = options?.limit ?? 100;
+    const maxDepth = options?.maxDepth ?? path.length;
+
+    // In production mode, delegate to shard layer via orchestrator
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('pathTraverse');
+
+      if (path.length === 0) {
+        // Just lookup the start entity
+        const entity = await this.getEntity(startId);
+        return entity ? [entity] : [];
+      }
+
+      // Build multi-hop traversal query
+      // For paths like ['friends', 'posts'], build: (n)-[:friends]->(m)-[:posts]->(o)
+      const pathStr = path.slice(0, maxDepth).map(p => `[:${p}]->`).join('()');
+      const query = `MATCH (n {$id: "${startId}"})-${pathStr}(result) RETURN result`;
+      const plan = planQuery(query);
+      const result = await orchestrateQuery(plan, this.#getShardStub!, { limit });
+
+      // Apply filter if provided
+      if (options?.filter) {
+        return result.entities.filter(e => this.#matchesFilter(e, options.filter!));
+      }
+      return result.entities;
+    }
+
+    // Test mode: use in-memory store
     if (path.length === 0) {
       const entity = this.#entities.get(startId);
       return entity ? [entity] : [];
     }
 
     let currentIds = [startId];
-    const maxDepth = options?.maxDepth ?? path.length;
 
     for (let i = 0; i < Math.min(path.length, maxDepth); i++) {
       const predicate = path[i];
@@ -570,7 +791,6 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
 
     // Get entities for final IDs
     const results: Entity[] = [];
-    const limit = options?.limit ?? 100;
 
     for (const id of currentIds) {
       const entity = this.#entities.get(id);
@@ -595,14 +815,15 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     const limit = options?.limit ?? 100;
     const cursor = options?.cursor;
 
-    // If we have a shard stub getter, use the orchestrator for Cypher-like queries
-    if (this.#getShardStub) {
+    // In production mode, always use the orchestrator
+    if (!this.#useInMemoryStore()) {
+      this.#requireTestModeOrShardStub('query');
       const plan = planQuery(queryString);
       const paginationOptions = cursor !== undefined ? { cursor, limit } : { limit };
-      return orchestrateQuery(plan, this.#getShardStub, paginationOptions);
+      return orchestrateQuery(plan, this.#getShardStub!, paginationOptions);
     }
 
-    // Use the graph-api-executor for local query execution
+    // Test mode: Use the graph-api-executor for local query execution
     // This handles both full URL and short-form entity lookups
     const { entityId, path } = parseQueryString(queryString);
 
@@ -829,5 +1050,20 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
       }
     }
     return true;
+  }
+
+  /**
+   * Calculate shard ID for an entity using hash-based routing.
+   * Uses FNV-1a hash algorithm consistent with orchestrator.hashToShard().
+   */
+  #getShardIdForEntity(entityId: string): string {
+    // Simple hash function matching orchestrator.ts hashToShard()
+    let hash = 0;
+    for (let i = 0; i < entityId.length; i++) {
+      const char = entityId.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return `shard-${Math.abs(hash) % 16}`;
   }
 }

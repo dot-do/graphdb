@@ -77,6 +77,10 @@
     "./client": {
       "types": "./dist/client/index.d.ts",
       "import": "./dist/client/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "import": "./dist/observability/index.js"
     }
   },
   "files": [
@@ -87,9 +91,16 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "check:snippet-size": "bash scripts/check-snippet-size.sh",
+    "migrate": "npx tsx scripts/migrate.ts",
+    "migrate:status": "npx tsx scripts/migrate.ts status",
+    "migrate:up": "npx tsx scripts/migrate.ts up",
+    "migrate:down": "npx tsx scripts/migrate.ts down",
+    "migrate:create": "npx tsx scripts/migrate.ts create",
     "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [

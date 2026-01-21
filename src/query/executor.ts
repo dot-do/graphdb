@@ -28,6 +28,12 @@ export const MAX_PATH_DEPTH = 100;
  */
 export const DEFAULT_PATH_DEPTH = 10;
 
+/**
+ * Maximum traversal time in milliseconds to prevent long-running queries
+ * on high fan-out graphs. Default: 30 seconds.
+ */
+export const MAX_TRAVERSAL_TIME_MS = 30000;
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -670,6 +676,7 @@ async function executeExpand(
  *
  * Enforces MAX_PATH_DEPTH as an absolute upper bound to prevent
  * infinite recursion or DoS attacks via deeply nested traversals.
+ * Also enforces timeout to prevent long execution on high fan-out graphs.
  */
 async function executeRecurse(
   step: PlanStep,
@@ -681,7 +688,17 @@ async function executeRecurse(
   const maxDepth = Math.min(requestedDepth, MAX_PATH_DEPTH);
   let currentDepth = 0;
 
+  // Timeout configuration: use ctx.timeout if provided, otherwise default
+  const timeoutMs = ctx.timeout ?? MAX_TRAVERSAL_TIME_MS;
+  const startTime = Date.now();
+
   while (currentDepth < maxDepth && state.frontier.length > 0) {
+    // Check timeout at the start of each iteration
+    if (Date.now() - startTime > timeoutMs) {
+      // Return partial results collected so far
+      break;
+    }
+
     const stub = ctx.getShardStub(step.shardId);
     state.stats.shardQueries++;
 

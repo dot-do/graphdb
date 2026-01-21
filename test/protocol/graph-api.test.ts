@@ -27,7 +27,8 @@ describe('GraphAPITarget', () => {
   let api: GraphAPITarget;
 
   beforeEach(() => {
-    api = new GraphAPITarget();
+    // Use test mode to enable in-memory store for isolated testing
+    api = new GraphAPITarget({ mode: 'test' });
   });
 
   // ==========================================================================

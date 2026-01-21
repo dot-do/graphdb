@@ -18,7 +18,7 @@
  */
 
 import type { Env } from '../core/index.js';
-import type { CDCEvent } from '../shard/triggers.js';
+import type { CDCEvent } from '../storage/cdc-types.js';
 import type { Namespace, EntityId, Predicate, TransactionId } from '../core/types.js';
 import type { Triple } from '../core/triple.js';
 import { createNamespace } from '../core/types.js';

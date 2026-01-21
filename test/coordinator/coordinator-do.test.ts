@@ -20,7 +20,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import { CDCCoordinatorDO } from '../../src/coordinator/cdc-coordinator-do.js';
-import type { CDCEvent } from '../../src/shard/triggers.js';
+import type { CDCEvent } from '../../src/storage/cdc-types.js';
 import {
   ObjectType,
   createEntityId,

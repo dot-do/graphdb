@@ -90,7 +90,36 @@ export interface TripleStore {
   // Query helpers
   exists(subject: EntityId): Promise<boolean>;
   getLatestTriple(subject: EntityId, predicate: Predicate): Promise<Triple | null>;
+
+  /**
+   * Filter triples by predicate with a SQL-level condition.
+   * This pushes filtering to SQLite using the POS index for better scalability.
+   *
+   * Supported operators:
+   * - 'eq' (=): Exact match
+   * - 'neq' (!=): Not equal
+   * - 'gt' (>): Greater than (numeric/timestamp)
+   * - 'lt' (<): Less than (numeric/timestamp)
+   * - 'gte' (>=): Greater than or equal (numeric/timestamp)
+   * - 'lte' (<=): Less than or equal (numeric/timestamp)
+   * - 'contains': LIKE %value% (string only)
+   *
+   * @param predicate The predicate to filter on
+   * @param op The comparison operator
+   * @param value The value to compare against
+   * @returns Array of subject EntityIds that match the filter
+   */
+  filterSubjectsByPredicateValue(
+    predicate: Predicate,
+    op: FilterOperator,
+    value: string | number
+  ): Promise<EntityId[]>;
 }
+
+/**
+ * Filter operators supported by filterSubjectsByPredicateValue
+ */
+export type FilterOperator = 'eq' | 'neq' | 'gt' | 'lt' | 'gte' | 'lte' | 'contains';
 
 /**
  * Row representation of a triple in SQLite
@@ -609,6 +638,107 @@ export function createTripleStore(sql: SqlStorage): TripleStore {
       }
 
       return rowToTriple(rows[0] as Record<string, unknown>);
+    },
+
+    async filterSubjectsByPredicateValue(
+      predicate: Predicate,
+      op: FilterOperator,
+      value: string | number
+    ): Promise<EntityId[]> {
+      // Determine value type and appropriate column for comparison
+      const isNumeric = typeof value === 'number';
+      const isString = typeof value === 'string';
+
+      // Build the WHERE clause based on operator and value type
+      // Uses POS index (predicate, obj_type, subject) for efficient filtering
+      let whereClause: string;
+      let sqlValue: string | number = value;
+
+      // For numeric comparisons, we check multiple columns (obj_int64, obj_float64)
+      // For string comparisons, we use obj_string
+      if (isNumeric) {
+        // Numeric value - compare against obj_int64 or obj_float64
+        // Check both to handle INT32/INT64 and FLOAT64 types
+        switch (op) {
+          case 'eq':
+            whereClause = '(obj_int64 = ? OR obj_float64 = ?)';
+            break;
+          case 'neq':
+            whereClause = '(obj_int64 != ? OR obj_float64 != ? OR (obj_int64 IS NULL AND obj_float64 IS NULL))';
+            break;
+          case 'gt':
+            whereClause = '(obj_int64 > ? OR obj_float64 > ?)';
+            break;
+          case 'lt':
+            whereClause = '(obj_int64 < ? OR obj_float64 < ?)';
+            break;
+          case 'gte':
+            whereClause = '(obj_int64 >= ? OR obj_float64 >= ?)';
+            break;
+          case 'lte':
+            whereClause = '(obj_int64 <= ? OR obj_float64 <= ?)';
+            break;
+          case 'contains':
+            // 'contains' doesn't make sense for numbers, treat as eq
+            whereClause = '(obj_int64 = ? OR obj_float64 = ?)';
+            break;
+          default:
+            whereClause = '(obj_int64 = ? OR obj_float64 = ?)';
+        }
+      } else if (isString) {
+        // String value - compare against obj_string
+        switch (op) {
+          case 'eq':
+            whereClause = 'obj_string = ?';
+            break;
+          case 'neq':
+            whereClause = '(obj_string != ? OR obj_string IS NULL)';
+            break;
+          case 'gt':
+            whereClause = 'obj_string > ?';
+            break;
+          case 'lt':
+            whereClause = 'obj_string < ?';
+            break;
+          case 'gte':
+            whereClause = 'obj_string >= ?';
+            break;
+          case 'lte':
+            whereClause = 'obj_string <= ?';
+            break;
+          case 'contains':
+            whereClause = 'obj_string LIKE ?';
+            sqlValue = `%${value}%`;
+            break;
+          default:
+            whereClause = 'obj_string = ?';
+        }
+      } else {
+        // Fallback to string comparison
+        whereClause = 'obj_string = ?';
+      }
+
+      // Query to get distinct subjects matching the filter
+      // Uses a subquery to get the latest version of each subject's triple for this predicate
+      // This ensures we only match against current values, not historical ones
+      const queryParams = isNumeric
+        ? [predicate, sqlValue, sqlValue]  // Numeric needs value twice (for int64 and float64)
+        : [predicate, sqlValue];
+
+      const result = sql.exec(
+        `SELECT DISTINCT t1.subject
+         FROM triples t1
+         INNER JOIN (
+           SELECT subject, predicate, MAX(timestamp) as max_ts
+           FROM triples
+           WHERE predicate = ?
+           GROUP BY subject, predicate
+         ) t2 ON t1.subject = t2.subject AND t1.predicate = t2.predicate AND t1.timestamp = t2.max_ts
+         WHERE t1.obj_type != 0 AND ${whereClause}`,
+        ...queryParams
+      );
+
+      return [...result].map((row) => row['subject'] as EntityId);
     },
   };
 }

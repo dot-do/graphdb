@@ -181,6 +181,8 @@ post:456 <- likes                    # Reverse traversal
 user:123.friends*[depth <= 3]        # Bounded recursion
 ```
 
+See [Query Language Documentation](./docs/QUERY_LANGUAGE.md) for comprehensive syntax reference, operators, and examples.
+
 ## API Reference
 
 ### Core Types
@@ -314,6 +316,9 @@ import {
 
   // Compaction
   compactChunks, selectChunksForCompaction,
+
+  // Backup/Restore
+  listBackups, restoreFromBackup, validateBackup,
 } from '@dotdo/graphdb/storage';
 
 // Write CDC file
@@ -322,6 +327,94 @@ await writer.write(triples);
 
 // Compact chunks
 await compactChunks(r2Bucket, { level: 'L1', namespace: 'users' });
+```
+
+### Backup and Restore (Disaster Recovery)
+
+GraphDB supports disaster recovery through R2 CDC lakehouse backup/restore:
+
+```typescript
+import {
+  listBackups,
+  getBackupMetadata,
+  restoreFromBackup,
+  validateBackup,
+  findBackupBeforeTimestamp,
+  type BackupSnapshot,
+  type RestoreOptions,
+} from '@dotdo/graphdb/storage';
+
+// List available backup snapshots
+const backups = await listBackups(bucket, namespace, {
+  startDate: '2024-01-01',
+  endDate: '2024-01-31',
+});
+
+// Get metadata for a specific backup
+const metadata = await getBackupMetadata(bucket, backups[0]);
+console.log(`Backup contains ${metadata.fileCount} files, ${metadata.totalSizeBytes} bytes`);
+
+// Validate backup integrity
+const validation = await validateBackup(bucket, backups[0]);
+if (!validation.valid) {
+  console.error('Missing files:', validation.missingFiles);
+}
+
+// Full restore (replay all events)
+const result = await restoreFromBackup(
+  bucket,
+  namespace,
+  async (events) => {
+    await tripleStore.insertBatch(events.map(e => e.triple));
+  },
+  {
+    batchSize: 1000,
+    onProgress: (p) => console.log(`${p.percentComplete}% complete`),
+  }
+);
+
+// Point-in-time recovery
+const pitResult = await restoreFromBackup(
+  bucket,
+  namespace,
+  handler,
+  {
+    targetTimestamp: BigInt(Date.parse('2024-01-15T12:00:00Z')),
+  }
+);
+
+// Dry run (count events without applying)
+const dryRunResult = await restoreFromBackup(
+  bucket,
+  namespace,
+  handler,
+  { dryRun: true }
+);
+console.log(`Would restore ${dryRunResult.eventsReplayed} events`);
+```
+
+#### CLI Backup Tool
+
+A command-line tool is available for backup operations:
+
+```bash
+# List available backups
+npx tsx scripts/backup.ts list --namespace https://example.com/crm
+
+# Get backup info for a specific date
+npx tsx scripts/backup.ts info -n https://example.com/crm --date 2024-01-15
+
+# Validate backup integrity
+npx tsx scripts/backup.ts validate -n https://example.com/crm --date 2024-01-15
+
+# Dry-run restore to a point in time
+npx tsx scripts/backup.ts restore -n https://example.com/crm -t 2024-01-15T12:00:00Z
+
+# Execute actual restore
+npx tsx scripts/backup.ts restore -n https://example.com/crm -t 2024-01-15T12:00:00Z --execute
+
+# Export backup metadata
+npx tsx scripts/backup.ts export -n https://example.com/crm --date 2024-01-15 -o backup.json
 ```
 
 ### Protocol (capnweb RPC)
@@ -613,6 +706,18 @@ npm run deploy
 
 - [x] WS hibernation: 95% cost savings, quota resets per message
 - [x] Bloom snippets: 98% negative lookup rejection, <1us latency
+
+## Known Limitations
+
+**v0.1.0 Alpha Status** - This is an early release. The API may change in future versions as we gather feedback and refine the design.
+
+| Limitation | Description | Workaround |
+|------------|-------------|------------|
+| **CoordinatorDO is a stub** | Cross-shard query coordination is not yet implemented. The `CoordinatorDO` currently returns `NOT_IMPLEMENTED`. | Use `ShardDO` directly for single-shard queries |
+| **Multi-shard queries** | Queries spanning multiple shards require manual orchestration | Use `BrokerDO` with WebSocket connections to orchestrate multi-hop traversals |
+| **No distributed transactions** | Multi-shard write atomicity (2PC) is not implemented | Scope writes to single shards when possible |
+
+For production use cases requiring cross-shard coordination, please open an issue describing your requirements to help prioritize the roadmap.
 
 ## Roadmap
 

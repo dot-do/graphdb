@@ -224,6 +224,17 @@ import { cosineDistance, cosineSimilarity } from './hnsw/distance.js';
 import { SQLiteGraphStore, HNSW_GRAPH_SCHEMA } from './hnsw/sqlite-graph-store.js';
 import type { HNSWNode, HNSWConfig } from './hnsw/store.js';
 import { DEFAULT_HNSW_CONFIG, randomLevel } from './hnsw/store.js';
+
+// ============================================================================
+// VECTOR CACHE CONFIGURATION
+// ============================================================================
+
+/**
+ * Maximum number of vectors to load into memory cache per predicate.
+ * Workers have 128MB memory limit - this prevents OOM for large datasets.
+ * For larger datasets, HNSW will still work but may have reduced recall.
+ */
+const MAX_VECTORS_IN_CACHE = 10000;
 import {
   type IndexStore,
   type IndexStats,
@@ -1366,7 +1377,13 @@ export class SQLiteIndexStore implements IndexStore {
 
       if (rows.length === 0) return [];
       return JSON.parse(rows[0]!['connections'] as string) as string[];
-    } catch {
+    } catch (error) {
+      console.error('[HNSW] Failed to get node connections:', {
+        nodeId,
+        layer,
+        predicate,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
@@ -1441,14 +1458,27 @@ export class SQLiteIndexStore implements IndexStore {
   }
 
   /**
-   * Load all vectors for a predicate into memory cache
+   * Load vectors for a predicate into memory cache with pagination.
+   * Limited to MAX_VECTORS_IN_CACHE to prevent OOM in Workers (128MB limit).
+   *
+   * For larger datasets, HNSW search will still work but may have reduced
+   * recall since not all vectors are in memory for distance calculations.
    */
   private loadVectorCache(predicate: string): Map<string, number[]> {
     const cache = new Map<string, number[]>();
 
-    const rows = this.sql.exec(
-      `SELECT entity_id, vector FROM vector_index WHERE predicate = ?`,
+    // First, check total count to determine if truncation is needed
+    const countResult = this.sql.exec(
+      `SELECT COUNT(*) as cnt FROM vector_index WHERE predicate = ?`,
       predicate
+    ).toArray();
+    const totalCount = (countResult[0]?.['cnt'] as number) ?? 0;
+
+    // Load vectors with pagination limit to prevent OOM
+    const rows = this.sql.exec(
+      `SELECT entity_id, vector FROM vector_index WHERE predicate = ? LIMIT ?`,
+      predicate,
+      MAX_VECTORS_IN_CACHE
     ).toArray();
 
     for (const row of rows) {
@@ -1462,6 +1492,15 @@ export class SQLiteIndexStore implements IndexStore {
       const { entity_id: entityId, vector: vectorBytes } = row;
       const vector = Array.from(new Float32Array(vectorBytes));
       cache.set(entityId, vector);
+    }
+
+    // Log warning if cache was truncated
+    if (totalCount > MAX_VECTORS_IN_CACHE) {
+      console.warn(
+        `[VectorCache] Cache truncated for predicate "${predicate}": ` +
+        `loaded ${MAX_VECTORS_IN_CACHE} of ${totalCount} vectors. ` +
+        `HNSW search may have reduced recall for vectors not in cache.`
+      );
     }
 
     return cache;

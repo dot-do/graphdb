@@ -63,3 +63,34 @@ export {
   type CompactionResult,
   type CompactionChunkInfo,
 } from './compaction';
+
+export {
+  // CDC Types and Buffer
+  createCDCBuffer,
+
+  // Types
+  type CDCEvent,
+  type CDCBuffer,
+} from './cdc-types';
+
+export {
+  // R2 Restore functions
+  listBackups,
+  getBackupMetadata,
+  findBackupBeforeTimestamp,
+  restoreFromBackup,
+  restoreFromSnapshot,
+  estimateRestoreDuration,
+  validateBackup,
+  getBackupSize,
+  countBackupEvents,
+  estimateEventCount,
+
+  // Types
+  type BackupSnapshot,
+  type ListBackupsOptions,
+  type RestoreOptions,
+  type RestoreProgress,
+  type RestoreResult,
+  type RestoreEventHandler,
+} from './r2-restore';

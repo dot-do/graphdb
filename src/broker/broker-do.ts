@@ -15,10 +15,10 @@ import { newWorkersRpcResponse } from 'capnweb';
 import type { Env } from '../core/index.js';
 import { GraphAPITarget } from '../protocol/graph-api.js';
 import { safeJsonParse, JsonParseError } from '../security/json-validator.js';
-import { errorResponse, ErrorCode, wsErrorJson, WsErrorCode } from '../errors/api-error.js';
+import { errorResponse, ErrorCode, wsErrorJson, WsErrorCode, WsRpcError } from '../errors/api-error.js';
 import { routeEntity, getShardId } from '../snippet/router.js';
 import { createEntityId, createNamespace } from '../core/types.js';
-import { validateRpcCall, type RpcCallMessage } from '../rpc/types.js';
+import { validateRpcCall, type RpcCallMessage, type PingResponse, type ExecuteSubrequestsResponse } from '../rpc/types.js';
 
 /**
  * Maximum number of entries to keep in the subrequestsPerWake rolling window.
@@ -38,6 +38,20 @@ const MIN_SUBREQUESTS = 1;
  * and prevent abuse or accidental resource exhaustion.
  */
 const MAX_SUBREQUESTS = 1000;
+
+/**
+ * Number of metric updates before flushing to storage.
+ * This batches writes to reduce storage operations while ensuring
+ * metrics survive DO eviction with minimal data loss.
+ */
+const METRICS_FLUSH_THRESHOLD = 10;
+
+/**
+ * Interval in milliseconds for alarm-based metrics persistence.
+ * Ensures metrics are saved even during periods of low activity.
+ * Default: 60 seconds (1 minute)
+ */
+const METRICS_ALARM_INTERVAL_MS = 60_000;
 
 /**
  * Attachment data stored with hibernated WebSocket connections
@@ -84,7 +98,8 @@ export class BrokerDO implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly env: Env;
 
-  // Metrics persisted in memory (survives within session, reset on eviction)
+  // Metrics persisted in memory with periodic flush to storage
+  // Survives DO eviction (not just hibernation)
   private metrics: BrokerMetrics = {
     totalWakes: 0,
     totalSubrequests: 0,
@@ -92,6 +107,9 @@ export class BrokerDO implements DurableObject {
     subrequestsPerWake: [],
     lastWakeTimestamp: 0,
   };
+
+  // Counter for batching metrics storage writes
+  private metricsDirtyCount: number = 0;
 
   // Track state preservation across hibernation
   private stateValue: number = 0;
@@ -120,7 +138,56 @@ export class BrokerDO implements DurableObject {
       if (storedMetrics) {
         this.metrics = storedMetrics;
       }
+
+      // Schedule initial alarm for periodic metrics persistence
+      // This ensures metrics are saved even during low activity periods
+      await this.scheduleMetricsAlarm();
     });
+  }
+
+  /**
+   * Flush metrics to durable storage.
+   * Called periodically based on METRICS_FLUSH_THRESHOLD or by alarm.
+   */
+  private async flushMetrics(): Promise<void> {
+    await this.ctx.storage.put('metrics', this.metrics);
+    this.metricsDirtyCount = 0;
+  }
+
+  /**
+   * Mark metrics as dirty and flush if threshold reached.
+   * This batches writes to reduce storage operations.
+   */
+  private async markMetricsDirty(): Promise<void> {
+    this.metricsDirtyCount++;
+    if (this.metricsDirtyCount >= METRICS_FLUSH_THRESHOLD) {
+      await this.flushMetrics();
+    }
+  }
+
+  /**
+   * Schedule alarm for periodic metrics persistence.
+   * Only schedules if no alarm is currently set.
+   */
+  private async scheduleMetricsAlarm(): Promise<void> {
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (currentAlarm === null) {
+      await this.ctx.storage.setAlarm(Date.now() + METRICS_ALARM_INTERVAL_MS);
+    }
+  }
+
+  /**
+   * Handle alarm - flush dirty metrics and reschedule.
+   * This ensures metrics survive DO eviction even during low activity.
+   */
+  async alarm(): Promise<void> {
+    // Flush any dirty metrics to storage
+    if (this.metricsDirtyCount > 0) {
+      await this.flushMetrics();
+    }
+
+    // Reschedule alarm for continuous protection
+    await this.ctx.storage.setAlarm(Date.now() + METRICS_ALARM_INTERVAL_MS);
   }
 
   /**
@@ -218,6 +285,9 @@ export class BrokerDO implements DurableObject {
     this.metrics.totalWakes++;
     this.metrics.lastWakeTimestamp = startTime;
 
+    // Mark metrics dirty - will be flushed after threshold or by alarm
+    await this.markMetricsDirty();
+
     // Convert ArrayBuffer to string if needed
     const messageStr =
       typeof message === 'string' ? message : new TextDecoder().decode(message as ArrayBuffer);
@@ -241,363 +311,159 @@ export class BrokerDO implements DurableObject {
 
     attachment.totalMessagesReceived++;
 
-    // Handle different message types
-    if (data['type'] === 'ping') {
-      ws.send(
-        JSON.stringify({
-          type: 'pong',
-          timestamp: data['timestamp'],
-          serverTime: Date.now(),
-          stateValue: this.stateValue,
-        })
-      );
-      ws.serializeAttachment(attachment);
-      return;
-    }
+    // ========================================================================
+    // ALL messages are now routed through the capnweb RPC system for consistency.
+    // Legacy 'type'-based messages are converted to RPC format for backward compatibility.
+    // ========================================================================
 
-    if (data['type'] === 'setState') {
-      this.stateValue = data['value'] as number;
-      await this.ctx.storage.put('stateValue', this.stateValue);
-      ws.send(
-        JSON.stringify({
-          type: 'stateSet',
-          value: this.stateValue,
-        })
-      );
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    if (data['type'] === 'getState') {
-      ws.send(
-        JSON.stringify({
-          type: 'state',
-          value: this.stateValue,
-        })
-      );
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    // Cursor storage for pagination across hibernation
-    if (data['type'] === 'storeCursor') {
-      const queryId = data['queryId'] as string;
-      const cursor = data['cursor'] as string | undefined;
-
-      if (!queryId) {
-        ws.send(wsErrorJson(WsErrorCode.MISSING_PARAMETER, 'queryId is required for storeCursor', undefined, { parameter: 'queryId' }));
-        ws.serializeAttachment(attachment);
-        return;
-      }
-
-      // Initialize cursors map if not present
-      if (!attachment.cursors) {
-        attachment.cursors = {};
-      }
-
-      // Store the cursor (or remove if undefined)
-      if (cursor) {
-        attachment.cursors[queryId] = cursor;
-      } else {
-        delete attachment.cursors[queryId];
-      }
-
-      ws.send(
-        JSON.stringify({
-          type: 'cursorStored',
-          queryId,
-          success: true,
-        })
-      );
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    if (data['type'] === 'getCursor') {
-      const queryId = data['queryId'] as string;
-
-      if (!queryId) {
-        ws.send(wsErrorJson(WsErrorCode.MISSING_PARAMETER, 'queryId is required for getCursor', undefined, { parameter: 'queryId' }));
-        ws.serializeAttachment(attachment);
-        return;
-      }
-
-      const cursor = attachment.cursors?.[queryId];
-
-      ws.send(
-        JSON.stringify({
-          type: 'cursor',
-          queryId,
-          cursor,
-        })
-      );
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    if (data['type'] === 'clearCursor') {
-      const queryId = data['queryId'] as string;
-
-      if (!queryId) {
-        ws.send(wsErrorJson(WsErrorCode.MISSING_PARAMETER, 'queryId is required for clearCursor', undefined, { parameter: 'queryId' }));
-        ws.serializeAttachment(attachment);
-        return;
-      }
-
-      if (attachment.cursors) {
-        delete attachment.cursors[queryId];
-      }
-
-      ws.send(
-        JSON.stringify({
-          type: 'cursorCleared',
-          queryId,
-          success: true,
-        })
-      );
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    // Handle query execution with pagination support
-    if (data['type'] === 'query') {
-      const query = data['query'] as string;
-      const limit = (data['limit'] as number) ?? 100;
-      const queryId = data['queryId'] as string | undefined;
-
-      // Get cursor from request, or fall back to stored cursor for this query
-      let cursor = data['cursor'] as string | undefined;
-      if (!cursor && queryId && attachment.cursors?.[queryId]) {
-        cursor = attachment.cursors[queryId];
-      }
-
-      try {
-        // Execute query using GraphAPI with cursor support
-        const queryOptions = cursor !== undefined ? { cursor, limit } : { limit };
-        const result = await this.graphApi.query(query, queryOptions);
-
-        // Store or clear cursor in attachment for hibernation survival
-        if (queryId) {
-          if (!attachment.cursors) {
-            attachment.cursors = {};
-          }
-
-          if (result.cursor && result.hasMore) {
-            // Store cursor for next page
-            attachment.cursors[queryId] = result.cursor;
-          } else {
-            // Clear cursor when pagination is complete
-            delete attachment.cursors[queryId];
-          }
-        }
-
-        // Return result with pagination info
-        ws.send(
-          JSON.stringify({
-            type: 'queryResult',
-            queryId,
-            result: {
-              entities: result.entities,
-              cursor: result.cursor,
-              hasMore: result.hasMore,
-              stats: result.stats,
-            },
-          })
-        );
-      } catch (error) {
-        ws.send(wsErrorJson(WsErrorCode.QUERY_FAILED, error instanceof Error ? error.message : 'Query execution failed'));
-      }
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    // capnweb RPC message handling
-    // Messages with 'method' field are RPC calls
-    if (data['method']) {
-      try {
-        const result = await this.handleRpcCall(data);
-        ws.send(JSON.stringify(result));
-      } catch (error) {
-        ws.send(wsErrorJson(
-          WsErrorCode.RPC_ERROR,
-          error instanceof Error ? error.message : 'Unknown error',
-          data['id'] as string | undefined
-        ));
-      }
-      ws.serializeAttachment(attachment);
-      return;
-    }
+    // Convert legacy 'type'-based messages to RPC format
+    // This maintains backward compatibility while standardizing on capnweb RPC
+    const rpcData = this.convertLegacyToRpc(data, attachment);
 
     // Handle batched RPC calls (for promise pipelining)
-    // Each call in the batch can return a different type, so we use an array
-    // of RPC result objects { type: 'result', id: string, result: unknown }
-    if (Array.isArray(data['calls'])) {
+    if (Array.isArray(rpcData['calls'])) {
       try {
         const results: Array<{ type: 'result'; id: string | undefined; result: unknown }> = [];
-        for (const call of data['calls'] as Record<string, unknown>[]) {
-          results.push(await this.handleRpcCall(call) as { type: 'result'; id: string | undefined; result: unknown });
+        for (const call of rpcData['calls'] as Record<string, unknown>[]) {
+          results.push(await this.handleRpcCall(call, ws, attachment) as { type: 'result'; id: string | undefined; result: unknown });
         }
-        ws.send(JSON.stringify({ id: data['id'], type: 'batch', results }));
+        ws.send(JSON.stringify({ id: rpcData['id'], type: 'batch', results }));
       } catch (error) {
-        ws.send(wsErrorJson(
-          WsErrorCode.RPC_ERROR,
-          error instanceof Error ? error.message : 'Unknown error',
-          data['id'] as string | undefined
-        ));
+        // Preserve WsRpcError codes for proper error categorization
+        if (error instanceof WsRpcError) {
+          ws.send(error.toJson());
+        } else {
+          ws.send(wsErrorJson(
+            WsErrorCode.RPC_ERROR,
+            error instanceof Error ? error.message : 'Unknown error',
+            rpcData['id'] as string | undefined
+          ));
+        }
       }
       ws.serializeAttachment(attachment);
       return;
     }
 
-    // Main operation: trigger N subrequests to shard DOs
-    const requestedSubrequests = (data['subrequests'] as number) ?? 10;
-    const messageId = (data['messageId'] as number) ?? attachment.totalMessagesReceived;
-
-    // Validate requestedSubrequests is within allowed bounds (1-1000)
-    // This prevents abuse and aligns with Cloudflare's subrequest quota per wake
-    if (
-      typeof requestedSubrequests !== 'number' ||
-      !Number.isFinite(requestedSubrequests) ||
-      requestedSubrequests < MIN_SUBREQUESTS ||
-      requestedSubrequests > MAX_SUBREQUESTS
-    ) {
-      ws.send(wsErrorJson(
-        WsErrorCode.VALIDATION_ERROR,
-        `subrequests must be a number between ${MIN_SUBREQUESTS} and ${MAX_SUBREQUESTS}`,
-        data['messageId'] as string | undefined,
-        {
-          parameter: 'subrequests',
-          received: requestedSubrequests,
-          min: MIN_SUBREQUESTS,
-          max: MAX_SUBREQUESTS,
-        }
-      ));
-      ws.serializeAttachment(attachment);
-      return;
-    }
-
-    // Track results
-    let successCount = 0;
-    let failureCount = 0;
-    const errors: string[] = [];
-
-    // Determine shard using hash-based routing (FNV-1a)
-    // If a subject is provided, route based on its namespace
-    // Otherwise, use a default namespace
-    const subject = data['subject'] as string | undefined;
-    let shardIdName: string;
-
-    if (subject) {
-      // Use routeEntity for proper namespace extraction and hash-based routing
+    // Handle single RPC call (including converted legacy messages)
+    if (rpcData['method']) {
       try {
-        const entityId = createEntityId(subject);
-        const routeInfo = routeEntity(entityId);
-        shardIdName = routeInfo.shardId;
+        const result = await this.handleRpcCall(rpcData, ws, attachment);
+        ws.send(JSON.stringify(result));
       } catch (error) {
-        ws.send(wsErrorJson(
-          WsErrorCode.VALIDATION_ERROR,
-          error instanceof Error ? error.message : 'Invalid subject entity ID',
-          data['messageId'] as string | undefined,
-          { subject }
-        ));
-        ws.serializeAttachment(attachment);
-        return;
+        // Preserve WsRpcError codes for proper error categorization
+        if (error instanceof WsRpcError) {
+          ws.send(error.toJson());
+        } else {
+          ws.send(wsErrorJson(
+            WsErrorCode.RPC_ERROR,
+            error instanceof Error ? error.message : 'Unknown error',
+            rpcData['id'] as string | undefined
+          ));
+        }
       }
-    } else {
-      // Default namespace when no subject provided
-      const defaultNamespace = createNamespace('https://graphdb.default/');
-      shardIdName = getShardId(defaultNamespace);
+      ws.serializeAttachment(attachment);
+      return;
     }
 
-    // Get Shard DO stub using the hash-based shard ID
-    const shardId = this.env.SHARD.idFromName(shardIdName);
-    const shardStub = this.env.SHARD.get(shardId);
-
-    // Make subrequests in parallel batches to maximize throughput
-    const batchSize = 50; // Process 50 at a time to avoid overwhelming
-    const numSubrequests = Number(requestedSubrequests);
-    const batches = Math.ceil(numSubrequests / batchSize);
-
-    for (let batch = 0; batch < batches; batch++) {
-      const batchStart = batch * batchSize;
-      const batchEnd = Math.min(batchStart + batchSize, numSubrequests);
-      const batchPromises: Promise<void>[] = [];
-
-      for (let i = batchStart; i < batchEnd; i++) {
-        const promise = (async () => {
-          try {
-            const response = await shardStub.fetch(
-              new Request(`https://shard-do/count?messageId=${messageId}&index=${i}`)
-            );
-
-            if (response.ok) {
-              successCount++;
-            } else {
-              failureCount++;
-              const text = await response.text();
-              if (errors.length < 5) {
-                // Limit error collection
-                errors.push(`Request ${i}: ${response.status} - ${text.slice(0, 100)}`);
-              }
-            }
-          } catch (error) {
-            failureCount++;
-            if (errors.length < 5) {
-              errors.push(`Request ${i}: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          }
-        })();
-
-        batchPromises.push(promise);
-      }
-
-      await Promise.all(batchPromises);
-    }
-
-    const durationMs = Date.now() - startTime;
-
-    // Update metrics
-    this.metrics.totalSubrequests += successCount;
-    this.metrics.totalFailures += failureCount;
-    this.metrics.subrequestsPerWake.push(successCount);
-
-    // Enforce rolling window to prevent unbounded growth
-    if (this.metrics.subrequestsPerWake.length > MAX_SUBREQUESTS_PER_WAKE_ENTRIES) {
-      // Remove oldest entries to maintain window size
-      this.metrics.subrequestsPerWake = this.metrics.subrequestsPerWake.slice(
-        this.metrics.subrequestsPerWake.length - MAX_SUBREQUESTS_PER_WAKE_ENTRIES
-      );
-    }
-
-    // Persist metrics
-    await this.ctx.storage.put('metrics', this.metrics);
-
-    // Update attachment
-    attachment.totalSubrequestsMade += successCount;
+    // Unknown message format
+    ws.send(wsErrorJson(
+      WsErrorCode.INVALID_REQUEST,
+      'Unknown message format. Use capnweb RPC format: { method: string, args: unknown[], id?: string }',
+      undefined,
+      { receivedKeys: Object.keys(data) }
+    ));
     ws.serializeAttachment(attachment);
+  }
 
-    // Send result
-    const result: SubrequestBatchResult = {
-      messageId: Number(messageId),
-      requestedCount: numSubrequests,
-      successCount,
-      failureCount,
-      errors,
-      durationMs,
-      shardId: shardIdName,
-    };
+  /**
+   * Convert legacy 'type'-based messages to capnweb RPC format.
+   * This maintains backward compatibility while standardizing all messages on RPC.
+   *
+   * Legacy format: { type: 'ping', timestamp: 123 }
+   * RPC format: { method: 'ping', args: [123], id?: string }
+   */
+  private convertLegacyToRpc(
+    data: Record<string, unknown>,
+    attachment: WebSocketAttachment
+  ): Record<string, unknown> {
+    // If already in RPC format (has 'method' or 'calls'), return as-is
+    if (data['method'] || data['calls']) {
+      return data;
+    }
 
-    ws.send(
-      JSON.stringify({
-        type: 'subrequestResult',
-        result,
-        metrics: {
-          wakeNumber: this.metrics.totalWakes,
-          totalSubrequestsThisSession: this.metrics.totalSubrequests,
-          stateValue: this.stateValue,
-        },
-      })
-    );
+    const type = data['type'] as string | undefined;
+
+    // Convert legacy message types to RPC format
+    switch (type) {
+      case 'ping':
+        return {
+          method: 'ping',
+          args: data['timestamp'] !== undefined ? [data['timestamp']] : [],
+        };
+
+      case 'setState':
+        return {
+          method: 'setState',
+          args: [data['value']],
+        };
+
+      case 'getState':
+        return {
+          method: 'getState',
+          args: [],
+        };
+
+      case 'storeCursor':
+        return {
+          method: 'storeCursor',
+          args: data['cursor'] !== undefined
+            ? [data['queryId'], data['cursor']]
+            : [data['queryId']],
+        };
+
+      case 'getCursor':
+        return {
+          method: 'getCursor',
+          args: [data['queryId']],
+        };
+
+      case 'clearCursor':
+        return {
+          method: 'clearCursor',
+          args: [data['queryId']],
+        };
+
+      case 'query':
+        // Legacy query format with optional cursor from attachment
+        return {
+          method: 'query',
+          args: [
+            data['query'],
+            {
+              limit: data['limit'] ?? 100,
+              cursor: data['cursor'],
+            },
+          ],
+          // Pass queryId for cursor storage in attachment
+          _queryId: data['queryId'],
+        };
+
+      default:
+        // Legacy subrequest format (no type, just { subrequests: N })
+        if (data['subrequests'] !== undefined || !type) {
+          return {
+            method: 'executeSubrequests',
+            args: [
+              data['subrequests'] ?? 10,
+              data['messageId'] ?? attachment.totalMessagesReceived,
+              data['subject'],
+            ],
+          };
+        }
+
+        // Return original data (will be handled as unknown format)
+        return data;
+    }
   }
 
   /**
@@ -680,13 +546,22 @@ export class BrokerDO implements DurableObject {
   /**
    * Handle capnweb RPC call with type-safe parameter validation.
    *
-   * This method processes incoming RPC requests and routes them to the GraphAPI.
+   * This method processes incoming RPC requests and routes them to the GraphAPI
+   * or handles utility methods (ping, setState, cursor operations, etc.).
    * Validates parameters before execution to ensure type safety and prevent
    * malformed requests from reaching the API layer.
    *
    * Supports promise pipelining by processing batched calls.
+   *
+   * @param call - The RPC call message
+   * @param ws - WebSocket for attachment access (optional, needed for cursor operations)
+   * @param attachment - WebSocket attachment for cursor storage (optional)
    */
-  private async handleRpcCall(call: Record<string, unknown>): Promise<unknown> {
+  private async handleRpcCall(
+    call: Record<string, unknown>,
+    _ws?: WebSocket,
+    attachment?: WebSocketAttachment
+  ): Promise<unknown> {
     // Convert to RpcCallMessage for validation
     const callId = call['id'] as string | undefined;
     const rpcCall: RpcCallMessage = {
@@ -708,8 +583,12 @@ export class BrokerDO implements DurableObject {
     // Now we have type-safe params
     const params = validation.params;
 
-    // Route to GraphAPI method with type-safe arguments
+    // Route to appropriate handler based on method
     switch (params.method) {
+      // ======================================================================
+      // GraphAPI Methods
+      // ======================================================================
+
       case 'getEntity':
         return {
           type: 'result',
@@ -759,12 +638,28 @@ export class BrokerDO implements DurableObject {
           result: await this.graphApi.pathTraverse(params.args[0], params.args[1], params.args[2]),
         };
 
-      case 'query':
+      case 'query': {
+        const queryResult = await this.graphApi.query(params.args[0], params.args[1]);
+
+        // Handle cursor storage in attachment for legacy query format
+        const queryId = call['_queryId'] as string | undefined;
+        if (queryId && attachment) {
+          if (!attachment.cursors) {
+            attachment.cursors = {};
+          }
+          if (queryResult.cursor && queryResult.hasMore) {
+            attachment.cursors[queryId] = queryResult.cursor;
+          } else {
+            delete attachment.cursors[queryId];
+          }
+        }
+
         return {
           type: 'result',
           id: call['id'],
-          result: await this.graphApi.query(params.args[0], params.args[1]),
+          result: queryResult,
         };
+      }
 
       case 'batchGet':
         return {
@@ -786,6 +681,232 @@ export class BrokerDO implements DurableObject {
           id: call['id'],
           result: await this.graphApi.batchExecute(params.args[0]),
         };
+
+      // ======================================================================
+      // Utility Methods (migrated from ad-hoc messages)
+      // ======================================================================
+
+      case 'ping': {
+        const pingResult: PingResponse = {
+          serverTime: Date.now(),
+          stateValue: this.stateValue,
+        };
+        if (params.args[0] !== undefined) {
+          pingResult.timestamp = params.args[0];
+        }
+        // Also send legacy 'pong' type for backward compatibility
+        return {
+          type: 'pong', // Legacy type for backward compatibility
+          id: call['id'],
+          ...pingResult,
+        };
+      }
+
+      case 'setState': {
+        this.stateValue = params.args[0];
+        await this.ctx.storage.put('stateValue', this.stateValue);
+        return {
+          type: 'stateSet', // Legacy type for backward compatibility
+          id: call['id'],
+          value: this.stateValue,
+        };
+      }
+
+      case 'getState':
+        return {
+          type: 'state', // Legacy type for backward compatibility
+          id: call['id'],
+          value: this.stateValue,
+        };
+
+      case 'storeCursor': {
+        const queryIdStore = params.args[0];
+        const cursorValue = params.args[1];
+
+        if (attachment) {
+          if (!attachment.cursors) {
+            attachment.cursors = {};
+          }
+          if (cursorValue) {
+            attachment.cursors[queryIdStore] = cursorValue;
+          } else {
+            delete attachment.cursors[queryIdStore];
+          }
+        }
+
+        return {
+          type: 'cursorStored', // Legacy type for backward compatibility
+          id: call['id'],
+          queryId: queryIdStore,
+          success: true,
+        };
+      }
+
+      case 'getCursor': {
+        const queryIdGet = params.args[0];
+        const storedCursor = attachment?.cursors?.[queryIdGet];
+
+        return {
+          type: 'cursor', // Legacy type for backward compatibility
+          id: call['id'],
+          queryId: queryIdGet,
+          cursor: storedCursor,
+        };
+      }
+
+      case 'clearCursor': {
+        const queryIdClear = params.args[0];
+
+        if (attachment?.cursors) {
+          delete attachment.cursors[queryIdClear];
+        }
+
+        return {
+          type: 'cursorCleared', // Legacy type for backward compatibility
+          id: call['id'],
+          queryId: queryIdClear,
+          success: true,
+        };
+      }
+
+      case 'executeSubrequests': {
+        const startTime = Date.now();
+        const requestedSubrequests = params.args[0];
+        const messageId = params.args[1] ?? (attachment?.totalMessagesReceived ?? 0);
+        const subject = params.args[2];
+
+        // Validate requestedSubrequests is within allowed bounds (1-1000)
+        if (
+          !Number.isFinite(requestedSubrequests) ||
+          requestedSubrequests < MIN_SUBREQUESTS ||
+          requestedSubrequests > MAX_SUBREQUESTS
+        ) {
+          throw new WsRpcError(
+            WsErrorCode.VALIDATION_ERROR,
+            `subrequests must be a number between ${MIN_SUBREQUESTS} and ${MAX_SUBREQUESTS}`,
+            call['id'] as string | undefined,
+            {
+              parameter: 'subrequests',
+              received: requestedSubrequests,
+              min: MIN_SUBREQUESTS,
+              max: MAX_SUBREQUESTS,
+            }
+          );
+        }
+
+        // Track results
+        let successCount = 0;
+        let failureCount = 0;
+        const errors: string[] = [];
+
+        // Determine shard using hash-based routing
+        let shardIdName: string;
+
+        if (subject) {
+          try {
+            const entityId = createEntityId(subject);
+            const routeInfo = routeEntity(entityId);
+            shardIdName = routeInfo.shardId;
+          } catch (error) {
+            throw new WsRpcError(
+              WsErrorCode.VALIDATION_ERROR,
+              `Invalid subject entity ID: ${error instanceof Error ? error.message : String(error)}`,
+              call['id'] as string | undefined,
+              { subject }
+            );
+          }
+        } else {
+          const defaultNamespace = createNamespace('https://graphdb.default/');
+          shardIdName = getShardId(defaultNamespace);
+        }
+
+        // Get Shard DO stub
+        const shardId = this.env.SHARD.idFromName(shardIdName);
+        const shardStub = this.env.SHARD.get(shardId);
+
+        // Make subrequests in parallel batches
+        const batchSize = 50;
+        const numSubrequests = Number(requestedSubrequests);
+        const batches = Math.ceil(numSubrequests / batchSize);
+
+        for (let batch = 0; batch < batches; batch++) {
+          const batchStart = batch * batchSize;
+          const batchEnd = Math.min(batchStart + batchSize, numSubrequests);
+          const batchPromises: Promise<void>[] = [];
+
+          for (let i = batchStart; i < batchEnd; i++) {
+            const promise = (async () => {
+              try {
+                const response = await shardStub.fetch(
+                  new Request(`https://shard-do/count?messageId=${messageId}&index=${i}`)
+                );
+
+                if (response.ok) {
+                  successCount++;
+                } else {
+                  failureCount++;
+                  const text = await response.text();
+                  if (errors.length < 5) {
+                    errors.push(`Request ${i}: ${response.status} - ${text.slice(0, 100)}`);
+                  }
+                }
+              } catch (error) {
+                failureCount++;
+                if (errors.length < 5) {
+                  errors.push(`Request ${i}: ${error instanceof Error ? error.message : String(error)}`);
+                }
+              }
+            })();
+
+            batchPromises.push(promise);
+          }
+
+          await Promise.all(batchPromises);
+        }
+
+        const durationMs = Date.now() - startTime;
+
+        // Update metrics
+        this.metrics.totalSubrequests += successCount;
+        this.metrics.totalFailures += failureCount;
+        this.metrics.subrequestsPerWake.push(successCount);
+
+        // Enforce rolling window
+        if (this.metrics.subrequestsPerWake.length > MAX_SUBREQUESTS_PER_WAKE_ENTRIES) {
+          this.metrics.subrequestsPerWake = this.metrics.subrequestsPerWake.slice(
+            this.metrics.subrequestsPerWake.length - MAX_SUBREQUESTS_PER_WAKE_ENTRIES
+          );
+        }
+
+        await this.markMetricsDirty();
+
+        // Update attachment
+        if (attachment) {
+          attachment.totalSubrequestsMade += successCount;
+        }
+
+        const subrequestResult: ExecuteSubrequestsResponse = {
+          messageId: Number(messageId),
+          requestedCount: numSubrequests,
+          successCount,
+          failureCount,
+          errors,
+          durationMs,
+          shardId: shardIdName,
+          metrics: {
+            wakeNumber: this.metrics.totalWakes,
+            totalSubrequestsThisSession: this.metrics.totalSubrequests,
+            stateValue: this.stateValue,
+          },
+        };
+
+        return {
+          type: 'subrequestResult', // Legacy type for backward compatibility
+          id: call['id'],
+          result: subrequestResult,
+          metrics: subrequestResult.metrics,
+        };
+      }
 
       default: {
         // TypeScript exhaustiveness check

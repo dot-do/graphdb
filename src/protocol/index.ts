@@ -32,6 +32,8 @@ export type {
   TraversalOptions,
   BatchResult,
   GraphAPI,
+  GraphAPIMode,
+  GraphAPITargetOptions,
 } from './graph-api.js';
 
 export { GraphAPITarget } from './graph-api.js';

@@ -367,6 +367,73 @@ export interface BatchExecuteParams {
   args: [operations: BatchOperation[]];
 }
 
+// ============================================================================
+// Utility RPC Methods (migrated from ad-hoc WebSocket messages)
+// ============================================================================
+
+/**
+ * Parameters for ping RPC call.
+ * Used to measure connection latency and verify connection health.
+ */
+export interface PingParams {
+  method: 'ping';
+  args: [timestamp?: number];
+}
+
+/**
+ * Parameters for setState RPC call.
+ * Sets the broker's state value (persisted across hibernation).
+ */
+export interface SetStateParams {
+  method: 'setState';
+  args: [value: number];
+}
+
+/**
+ * Parameters for getState RPC call.
+ * Retrieves the broker's current state value.
+ */
+export interface GetStateParams {
+  method: 'getState';
+  args: [];
+}
+
+/**
+ * Parameters for storeCursor RPC call.
+ * Stores a pagination cursor in WebSocket attachment for hibernation survival.
+ */
+export interface StoreCursorParams {
+  method: 'storeCursor';
+  args: [queryId: string, cursor?: string];
+}
+
+/**
+ * Parameters for getCursor RPC call.
+ * Retrieves a stored pagination cursor from WebSocket attachment.
+ */
+export interface GetCursorParams {
+  method: 'getCursor';
+  args: [queryId: string];
+}
+
+/**
+ * Parameters for clearCursor RPC call.
+ * Removes a stored pagination cursor from WebSocket attachment.
+ */
+export interface ClearCursorParams {
+  method: 'clearCursor';
+  args: [queryId: string];
+}
+
+/**
+ * Parameters for executeSubrequests RPC call.
+ * Triggers N subrequests to shard DOs (for testing hibernation quota reset).
+ */
+export interface ExecuteSubrequestsParams {
+  method: 'executeSubrequests';
+  args: [subrequests: number, messageId?: number, subject?: string];
+}
+
 /**
  * Discriminated union of all valid RPC call parameters.
  *
@@ -398,7 +465,15 @@ export type RpcCallParams =
   | QueryParams
   | BatchGetParams
   | BatchCreateParams
-  | BatchExecuteParams;
+  | BatchExecuteParams
+  // Utility methods (migrated from ad-hoc messages)
+  | PingParams
+  | SetStateParams
+  | GetStateParams
+  | StoreCursorParams
+  | GetCursorParams
+  | ClearCursorParams
+  | ExecuteSubrequestsParams;
 
 /**
  * Valid RPC method names (derived from RpcCallParams).
@@ -458,6 +533,14 @@ const VALID_RPC_METHODS = new Set<RpcMethodName>([
   'batchGet',
   'batchCreate',
   'batchExecute',
+  // Utility methods
+  'ping',
+  'setState',
+  'getState',
+  'storeCursor',
+  'getCursor',
+  'clearCursor',
+  'executeSubrequests',
 ]);
 
 /**
@@ -734,6 +817,102 @@ export function validateRpcCall(call: RpcCallMessage): RpcValidationResult {
       };
     }
 
+    // ========================================================================
+    // Utility Methods (migrated from ad-hoc WebSocket messages)
+    // ========================================================================
+
+    case 'ping': {
+      // timestamp is optional, defaults to undefined
+      const timestamp = args[0] !== undefined ? args[0] as number : undefined;
+      if (timestamp !== undefined && typeof timestamp !== 'number') {
+        return { valid: false, error: 'ping timestamp must be a number if provided' };
+      }
+      const pingArgs: [number?] = timestamp !== undefined ? [timestamp] : [];
+      return {
+        valid: true,
+        params: { method: 'ping', args: pingArgs },
+      };
+    }
+
+    case 'setState': {
+      if (args.length < 1 || typeof args[0] !== 'number') {
+        return { valid: false, error: 'setState requires a number value' };
+      }
+      return {
+        valid: true,
+        params: { method: 'setState', args: [args[0]] },
+      };
+    }
+
+    case 'getState': {
+      // No arguments required
+      return {
+        valid: true,
+        params: { method: 'getState', args: [] },
+      };
+    }
+
+    case 'storeCursor': {
+      if (args.length < 1 || !isNonEmptyString(args[0])) {
+        return { valid: false, error: 'storeCursor requires a non-empty queryId string' };
+      }
+      const cursor = args[1] !== undefined ? args[1] as string : undefined;
+      if (cursor !== undefined && typeof cursor !== 'string') {
+        return { valid: false, error: 'storeCursor cursor must be a string if provided' };
+      }
+      const storeCursorArgs: [string, string?] = cursor !== undefined
+        ? [args[0], cursor]
+        : [args[0]];
+      return {
+        valid: true,
+        params: { method: 'storeCursor', args: storeCursorArgs },
+      };
+    }
+
+    case 'getCursor': {
+      if (args.length < 1 || !isNonEmptyString(args[0])) {
+        return { valid: false, error: 'getCursor requires a non-empty queryId string' };
+      }
+      return {
+        valid: true,
+        params: { method: 'getCursor', args: [args[0]] },
+      };
+    }
+
+    case 'clearCursor': {
+      if (args.length < 1 || !isNonEmptyString(args[0])) {
+        return { valid: false, error: 'clearCursor requires a non-empty queryId string' };
+      }
+      return {
+        valid: true,
+        params: { method: 'clearCursor', args: [args[0]] },
+      };
+    }
+
+    case 'executeSubrequests': {
+      if (args.length < 1 || typeof args[0] !== 'number') {
+        return { valid: false, error: 'executeSubrequests requires a number for subrequests count' };
+      }
+      const messageId = args[1] !== undefined ? args[1] as number : undefined;
+      const subject = args[2] !== undefined ? args[2] as string : undefined;
+      if (messageId !== undefined && typeof messageId !== 'number') {
+        return { valid: false, error: 'executeSubrequests messageId must be a number if provided' };
+      }
+      if (subject !== undefined && typeof subject !== 'string') {
+        return { valid: false, error: 'executeSubrequests subject must be a string if provided' };
+      }
+      const executeArgs: [number, number?, string?] = [args[0]];
+      if (messageId !== undefined) executeArgs.push(messageId);
+      if (subject !== undefined) {
+        if (executeArgs.length === 1) executeArgs.push(undefined);
+        executeArgs.push(subject);
+      }
+      return {
+        valid: true,
+        params: { method: 'executeSubrequests', args: executeArgs as [number, number?, string?] },
+      };
+    }
+
     default: {
       // TypeScript exhaustiveness check - this should never be reached
       const _exhaustive: never = method;
@@ -748,6 +927,33 @@ export function validateRpcCall(call: RpcCallMessage): RpcValidationResult {
  * This type allows creating type-safe call functions that map method names
  * to their expected argument types.
  */
+/**
+ * Response type for ping RPC call.
+ */
+export interface PingResponse {
+  serverTime: number;
+  stateValue: number;
+  timestamp?: number;
+}
+
+/**
+ * Response type for executeSubrequests RPC call.
+ */
+export interface ExecuteSubrequestsResponse {
+  messageId: number;
+  requestedCount: number;
+  successCount: number;
+  failureCount: number;
+  errors: string[];
+  durationMs: number;
+  shardId: string;
+  metrics: {
+    wakeNumber: number;
+    totalSubrequestsThisSession: number;
+    stateValue: number;
+  };
+}
+
 export type TypedRpcCall = {
   // Entity operations
   (method: 'getEntity', id: string): Promise<Entity | null>;
@@ -767,4 +973,13 @@ export type TypedRpcCall = {
   (method: 'batchGet', ids: string[]): Promise<import('../protocol/graph-api.js').BatchResult<Entity | null>>;
   (method: 'batchCreate', entities: Entity[]): Promise<import('../protocol/graph-api.js').BatchResult<void>>;
   (method: 'batchExecute', operations: BatchOperation[]): Promise<import('../protocol/graph-api.js').BatchResult<unknown>>;
+
+  // Utility operations (migrated from ad-hoc messages)
+  (method: 'ping', timestamp?: number): Promise<PingResponse>;
+  (method: 'setState', value: number): Promise<{ value: number }>;
+  (method: 'getState'): Promise<{ value: number }>;
+  (method: 'storeCursor', queryId: string, cursor?: string): Promise<{ queryId: string; success: boolean }>;
+  (method: 'getCursor', queryId: string): Promise<{ queryId: string; cursor?: string }>;
+  (method: 'clearCursor', queryId: string): Promise<{ queryId: string; success: boolean }>;
+  (method: 'executeSubrequests', subrequests: number, messageId?: number, subject?: string): Promise<ExecuteSubrequestsResponse>;
 };

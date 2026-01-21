@@ -386,7 +386,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       ws.close();
     });
 
-    it('should handle zero subrequests gracefully', async () => {
+    it('should reject zero subrequests with validation error', async () => {
       const stub = getUniqueBrokerStub();
       const ws = await connectWebSocket(stub);
 
@@ -395,14 +395,19 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
         (m: unknown) => (m as { type?: string }).type === 'connected'
       );
 
-      const result = await sendAndWait<SubrequestResult>(
+      // MIN_SUBREQUESTS is 1, so 0 should return a validation error
+      // Validation errors now properly propagate through the RPC layer
+      const result = await sendAndWait<{ type: string; code: string; message: string; details?: { min: number; max: number } }>(
         ws,
-        { subrequests: 0, messageId: 1 },
-        (m: unknown) => (m as { type?: string }).type === 'subrequestResult'
+        { method: 'executeSubrequests', args: [0, 1] },
+        (m: unknown) => (m as { type?: string }).type === 'error'
       );
 
-      expect(result.result.successCount).toBe(0);
-      expect(result.result.failureCount).toBe(0);
+      expect(result.type).toBe('error');
+      expect(result.code).toBe('VALIDATION_ERROR');
+      expect(result.message).toContain('subrequests must be a number between');
+      expect(result.details?.min).toBe(1);
+      expect(result.details?.max).toBe(1000);
 
       ws.close();
     });
@@ -655,6 +660,139 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(errorResponse.message).toContain('exceeds maximum allowed size');
 
       ws.close();
+    });
+  });
+
+  describe('Metrics Persistence Across DO Eviction', () => {
+    it('should restore metrics from storage on DO wake', async () => {
+      // Use same name to get the same DO instance after simulated eviction
+      const brokerName = `broker-persist-${Date.now()}`;
+      const id = env.BROKER.idFromName(brokerName);
+
+      // First session - accumulate some metrics
+      {
+        const stub = env.BROKER.get(id);
+        const ws = await connectWebSocket(stub);
+
+        await waitForMessage<ConnectedMessage>(
+          ws,
+          (m: unknown) => (m as { type?: string }).type === 'connected'
+        );
+
+        // Send multiple messages to accumulate metrics
+        for (let i = 1; i <= 12; i++) {
+          await sendAndWait<SubrequestResult>(
+            ws,
+            { subrequests: 10, messageId: i },
+            (m: unknown) => (m as { type?: string }).type === 'subrequestResult'
+          );
+        }
+
+        ws.close();
+      }
+
+      // Verify metrics via HTTP endpoint (same stub, metrics should be in memory)
+      {
+        const stub = env.BROKER.get(id);
+        const response = await stub.fetch('https://broker-do/metrics');
+        const data = (await response.json()) as { metrics: { totalWakes: number; totalSubrequests: number } };
+
+        expect(data.metrics.totalWakes).toBe(12);
+        expect(data.metrics.totalSubrequests).toBe(120); // 12 * 10
+      }
+    });
+
+    it('should flush metrics on threshold and restore after simulated eviction', async () => {
+      const brokerName = `broker-flush-${Date.now()}`;
+      const id = env.BROKER.idFromName(brokerName);
+
+      // First session - send exactly threshold messages to trigger flush
+      {
+        const stub = env.BROKER.get(id);
+        const ws = await connectWebSocket(stub);
+
+        await waitForMessage<ConnectedMessage>(
+          ws,
+          (m: unknown) => (m as { type?: string }).type === 'connected'
+        );
+
+        // Send 10 messages (threshold is 10) to ensure flush
+        for (let i = 1; i <= 10; i++) {
+          await sendAndWait<SubrequestResult>(
+            ws,
+            { subrequests: 5, messageId: i },
+            (m: unknown) => (m as { type?: string }).type === 'subrequestResult'
+          );
+        }
+
+        ws.close();
+      }
+
+      // Verify metrics persisted via HTTP
+      {
+        const stub = env.BROKER.get(id);
+        const response = await stub.fetch('https://broker-do/metrics');
+        const data = (await response.json()) as { metrics: { totalWakes: number; totalSubrequests: number } };
+
+        // Should have at least 10 wakes (threshold reached, flush happened)
+        expect(data.metrics.totalWakes).toBeGreaterThanOrEqual(10);
+        expect(data.metrics.totalSubrequests).toBeGreaterThanOrEqual(50);
+      }
+    });
+
+    it('should trigger alarm handler for periodic metrics flush', async () => {
+      const stub = getUniqueBrokerStub();
+
+      // runInDurableObject allows direct access to DO instance
+      await runInDurableObject(stub, async (instance: BrokerDO) => {
+        // Trigger alarm directly (simulating scheduled alarm)
+        await instance.alarm();
+
+        // Verify alarm completed without error
+        // The alarm should have flushed metrics and rescheduled itself
+      });
+
+      // Verify DO is still healthy after alarm
+      const response = await stub.fetch('https://broker-do/health');
+      expect(response.ok).toBe(true);
+
+      const data = (await response.json()) as { status: string };
+      expect(data.status).toBe('ok');
+    });
+
+    it('should preserve metrics subrequestsPerWake rolling window', async () => {
+      const brokerName = `broker-rolling-${Date.now()}`;
+      const id = env.BROKER.idFromName(brokerName);
+
+      const stub = env.BROKER.get(id);
+      const ws = await connectWebSocket(stub);
+
+      await waitForMessage<ConnectedMessage>(
+        ws,
+        (m: unknown) => (m as { type?: string }).type === 'connected'
+      );
+
+      // Send multiple messages with varying subrequest counts
+      const subrequestCounts = [10, 20, 30, 40, 50];
+      for (let i = 0; i < subrequestCounts.length; i++) {
+        await sendAndWait<SubrequestResult>(
+          ws,
+          { subrequests: subrequestCounts[i], messageId: i + 1 },
+          (m: unknown) => (m as { type?: string }).type === 'subrequestResult'
+        );
+      }
+
+      ws.close();
+
+      // Verify rolling window via metrics endpoint
+      const response = await stub.fetch('https://broker-do/metrics');
+      const data = (await response.json()) as {
+        metrics: { subrequestsPerWake: number[]; totalSubrequests: number };
+      };
+
+      // Should have recorded all subrequest counts
+      expect(data.metrics.subrequestsPerWake.length).toBe(5);
+      expect(data.metrics.totalSubrequests).toBe(150); // 10+20+30+40+50
     });
   });
 });

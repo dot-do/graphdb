@@ -19,8 +19,8 @@
  */
 
 import type { Env } from '../core/index.js';
-import { initializeSchema, getCurrentVersion, SCHEMA_VERSION } from './schema.js';
-import type { TripleStore } from './crud.js';
+import { initializeSchema, getCurrentVersion, SCHEMA_VERSION, migrateToVersion, MIGRATIONS } from './schema.js';
+import type { TripleStore, FilterOperator } from './crud.js';
 import { createTripleStore } from './crud.js';
 import type { ChunkStore } from './chunk-store.js';
 import { createChunkStore } from './chunk-store.js';
@@ -1225,6 +1225,9 @@ export class ShardDO implements DurableObject {
   /**
    * GET /filter - Filter entities by property value
    * Query params: field (property name), op (operator), value
+   *
+   * Optimized to push filtering to SQLite using the POS index.
+   * Supported operators: =, !=, >, <, >=, <=, contains
    */
   private async handleFilter(url: URL): Promise<Response> {
     try {
@@ -1247,49 +1250,30 @@ export class ShardDO implements DurableObject {
 
       const store = this.getTripleStore();
 
-      // Get all triples with this predicate
-      const triples = await store.getTriplesByPredicate(validatedField);
+      // Map URL operator to FilterOperator
+      const filterOp = this.mapToFilterOperator(op);
 
-      // Filter based on operator
-      const matchingSubjects = new Set<string>();
-      const value = isNaN(Number(valueStr)) ? valueStr : Number(valueStr);
+      // Parse value - try numeric first, fall back to string
+      const value: string | number = isNaN(Number(valueStr)) ? valueStr : Number(valueStr);
 
-      for (const triple of triples) {
-        // Skip null-typed objects which don't have a value property
-        if (triple.object.type === ObjectType.NULL) {
-          continue;
-        }
-        const tripleValue = triple.object.value;
-        let matches = false;
+      // Use optimized SQL-level filtering (pushes to SQLite using POS index)
+      const subjectIds = await store.filterSubjectsByPredicateValue(
+        validatedField,
+        filterOp,
+        value
+      );
 
-        switch (op) {
-          case '=':
-            matches = tripleValue === value;
-            break;
-          case '!=':
-            matches = tripleValue !== value;
-            break;
-          case '>':
-            matches = typeof tripleValue === 'number' && typeof value === 'number' && tripleValue > value;
-            break;
-          case '<':
-            matches = typeof tripleValue === 'number' && typeof value === 'number' && tripleValue < value;
-            break;
-          case '>=':
-            matches = typeof tripleValue === 'number' && typeof value === 'number' && tripleValue >= value;
-            break;
-          case '<=':
-            matches = typeof tripleValue === 'number' && typeof value === 'number' && tripleValue <= value;
-            break;
-        }
-
-        if (matches) {
-          matchingSubjects.add(triple.subject);
-        }
+      if (subjectIds.length === 0) {
+        return new Response(
+          JSON.stringify([]),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
       }
 
       // Get full entities for matching subjects (batch query to avoid N+1)
-      const subjectIds = [...matchingSubjects] as EntityId[];
       const triplesMap = await store.getTriplesForMultipleSubjects(subjectIds);
 
       const entities: Entity[] = [];
@@ -1317,6 +1301,37 @@ export class ShardDO implements DurableObject {
         'Failed to filter entities',
         { reason: String(error) }
       );
+    }
+  }
+
+  /**
+   * Map URL query operator to FilterOperator
+   */
+  private mapToFilterOperator(op: string): FilterOperator {
+    switch (op) {
+      case '=':
+      case 'eq':
+        return 'eq';
+      case '!=':
+      case 'neq':
+        return 'neq';
+      case '>':
+      case 'gt':
+        return 'gt';
+      case '<':
+      case 'lt':
+        return 'lt';
+      case '>=':
+      case 'gte':
+        return 'gte';
+      case '<=':
+      case 'lte':
+        return 'lte';
+      case 'contains':
+      case 'like':
+        return 'contains';
+      default:
+        return 'eq';
     }
   }
 

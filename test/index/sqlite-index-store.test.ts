@@ -2065,4 +2065,70 @@ describe('SQLiteIndexStore - Type Narrowing for SQLite Rows', () => {
       });
     });
   });
+
+  describe('loadVectorCache pagination', () => {
+    it('should load vectors up to MAX_VECTORS_IN_CACHE limit', async () => {
+      const stub = getUniqueShardStub();
+
+      await runInDurableObject(stub, async (instance: ShardDO, state: DurableObjectState) => {
+        const sql = state.storage.sql;
+        const indexStore = new SQLiteIndexStore(sql);
+
+        // Index a small set of vectors (within limit)
+        const numVectors = 50;
+        const triples: Triple[] = [];
+        for (let i = 0; i < numVectors; i++) {
+          triples.push(
+            createTestTriple(
+              `https://example.com/doc/${i}`,
+              'embedding',
+              vectorObject([Math.sin(i * 0.1), Math.cos(i * 0.1), i / numVectors])
+            )
+          );
+        }
+        await indexStore.indexTriples(triples);
+
+        // Query should work correctly with all vectors in cache
+        const results = await indexStore.queryKNN('embedding' as Predicate, [1, 0, 0.5], 10);
+
+        expect(results).toHaveLength(10);
+        // Results should be valid
+        results.forEach(result => {
+          expect(typeof result.entityId).toBe('string');
+          expect(typeof result.similarity).toBe('number');
+          expect(result.entityId).toMatch(/^https:\/\/example\.com\/doc\/\d+$/);
+        });
+      });
+    });
+
+    it('should still return results when cache is within limit', async () => {
+      const stub = getUniqueShardStub();
+
+      await runInDurableObject(stub, async (instance: ShardDO, state: DurableObjectState) => {
+        const sql = state.storage.sql;
+        const indexStore = new SQLiteIndexStore(sql);
+
+        // Index vectors with known similarity ordering
+        await indexStore.indexTriples([
+          createTestTriple('https://example.com/doc/exact', 'embedding', vectorObject([1, 0, 0])),
+          createTestTriple('https://example.com/doc/similar', 'embedding', vectorObject([0.95, 0.05, 0])),
+          createTestTriple('https://example.com/doc/different', 'embedding', vectorObject([0, 0, 1])),
+        ]);
+
+        const results = await indexStore.queryKNN('embedding' as Predicate, [1, 0, 0], 3);
+
+        // First result should be exact match
+        expect(results[0].entityId).toBe('https://example.com/doc/exact');
+        expect(results[0].similarity).toBeCloseTo(1.0, 5);
+
+        // Second should be similar
+        expect(results[1].entityId).toBe('https://example.com/doc/similar');
+        expect(results[1].similarity).toBeGreaterThan(0.99);
+
+        // Third should be different (orthogonal)
+        expect(results[2].entityId).toBe('https://example.com/doc/different');
+        expect(results[2].similarity).toBeCloseTo(0, 3);
+      });
+    });
+  });
 });

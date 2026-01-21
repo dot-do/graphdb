@@ -1,0 +1,3 @@
+# This file ensures the migrations directory is tracked by git
+# Custom migrations should be added here as versioned .ts files
+# See docs/MIGRATIONS.md for usage instructions

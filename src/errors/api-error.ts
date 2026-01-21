@@ -258,3 +258,52 @@ export function wsErrorJson(
 ): string {
   return JSON.stringify(createWsError(code, message, id, details));
 }
+
+/**
+ * RPC Error class for WebSocket errors that need to preserve error codes.
+ *
+ * Use this when throwing errors from RPC handlers to ensure the correct
+ * error code is returned to the client instead of a generic RPC_ERROR.
+ *
+ * @example
+ * ```typescript
+ * throw new WsRpcError(
+ *   WsErrorCode.VALIDATION_ERROR,
+ *   'Parameter X is invalid',
+ *   undefined,
+ *   { parameter: 'X' }
+ * );
+ * ```
+ */
+export class WsRpcError extends Error {
+  public readonly code: string;
+  public readonly id?: string;
+  public readonly details?: Record<string, unknown>;
+
+  constructor(
+    code: string,
+    message: string,
+    id?: string,
+    details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'WsRpcError';
+    this.code = code;
+    this.id = id;
+    this.details = details;
+  }
+
+  /**
+   * Convert to WebSocket error response JSON string.
+   */
+  toJson(): string {
+    return wsErrorJson(this.code, this.message, this.id, this.details);
+  }
+
+  /**
+   * Convert to WebSocket error response object.
+   */
+  toResponse(): WsErrorResponse {
+    return createWsError(this.code, this.message, this.id, this.details);
+  }
+}
