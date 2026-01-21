@@ -63,18 +63,94 @@ export interface QueryResult {
     shardQueries: number;
     entitiesScanned: number;
     durationMs: number;
+    aggregatedValue?: number;
+    shardLatencies?: Record<string, number>;
+    partialFailure?: boolean;
+    failedShards?: string[];
+    errors?: Array<{
+      shardId: string;
+      code: string;
+      message: string;
+    }>;
   };
 }
 
 /**
- * Pagination options for query orchestration
+ * Options for step execution with retry and timeout configuration
  */
-export interface PaginationOptions {
+export interface StepExecutionOptions {
+  /** Maximum number of retries (default: 3) */
+  maxRetries?: number;
+  /** Timeout in milliseconds for the step (default: 30000) */
+  timeoutMs?: number;
+  /** Maximum backoff delay in milliseconds (default: 10000) */
+  maxBackoffMs?: number;
+  /** Base backoff delay in milliseconds (default: 100) */
+  baseBackoffMs?: number;
+}
+
+/**
+ * Aggregation configuration for scatter-gather queries
+ */
+export interface AggregationConfig {
+  type: 'sum' | 'avg' | 'min' | 'max' | 'count';
+  field: string;
+}
+
+/**
+ * Options for query orchestration across shards
+ */
+export interface OrchestrateOptions {
   /** Cursor from previous response (base64 encoded JSON with offset) */
   cursor?: string;
   /** Maximum number of results to return (default: 100) */
   limit?: number;
+  /** Execute steps in parallel across shards */
+  parallel?: boolean;
+  /** Maximum concurrent shard requests (default: 10) */
+  maxConcurrency?: number;
+  /** Preserve original step order in results when executing in parallel */
+  preserveOrder?: boolean;
+  /** Merge strategy for combining results from multiple shards */
+  mergeStrategy?: 'union' | 'intersection' | 'ordered';
+  /** Field to order results by (for ordered merge strategy) */
+  orderBy?: string;
+  /** Sort direction (for ordered merge strategy) */
+  orderDirection?: 'asc' | 'desc';
+  /** Deduplicate entities by $id */
+  deduplicate?: boolean;
+  /** Field to compare when deduplicating (default: first seen) */
+  deduplicateBy?: string;
+  /** Prefer newer (higher value) when deduplicating */
+  preferNewer?: boolean;
+  /** Consistency model for reads */
+  consistency?: 'eventual' | 'read-your-writes' | 'quorum';
+  /** Write ID to await before reading (for read-your-writes consistency) */
+  awaitPendingWrite?: string;
+  /** Number of shards that must agree (for quorum consistency) */
+  quorumSize?: number;
+  /** Broadcast query to all shards */
+  broadcast?: boolean;
+  /** Aggregation configuration for scatter-gather */
+  aggregation?: AggregationConfig;
+  /** Enable early termination once limit is reached */
+  earlyTermination?: boolean;
+  /** Track shard health and latencies */
+  trackShardHealth?: boolean;
+  /** Use replica shard on primary failure */
+  useReplicaOnFailure?: boolean;
+  /** Map of primary shard IDs to replica shard IDs */
+  replicaShards?: Record<string, string>;
+  /** Allow partial results when some shards fail (default: false) */
+  allowPartialResults?: boolean;
+  /** Total timeout in milliseconds for the entire query */
+  totalTimeoutMs?: number;
 }
+
+/**
+ * Pagination options for query orchestration (legacy alias)
+ */
+export type PaginationOptions = OrchestrateOptions;
 
 // ============================================================================
 // Query Planning
@@ -273,16 +349,185 @@ export function planQuery(query: string): QueryPlan {
 }
 
 // ============================================================================
+// Circuit Breaker
+// ============================================================================
+
+interface CircuitBreakerState {
+  failures: number;
+  state: 'closed' | 'open' | 'half-open';
+  lastFailureTime: number;
+}
+
+// Circuit breaker configuration
+const CIRCUIT_BREAKER_THRESHOLD = 5; // failures before opening
+const CIRCUIT_BREAKER_COOLDOWN_MS = 30000; // 30 seconds before half-open
+
+// Global circuit breaker state per shard
+const circuitBreakers = new Map<string, CircuitBreakerState>();
+
+/**
+ * Reset all circuit breakers (for testing)
+ */
+export function resetCircuitBreakers(): void {
+  circuitBreakers.clear();
+}
+
+/**
+ * Get or create circuit breaker state for a shard
+ */
+function getCircuitBreaker(shardId: string): CircuitBreakerState {
+  let cb = circuitBreakers.get(shardId);
+  if (!cb) {
+    cb = { failures: 0, state: 'closed', lastFailureTime: 0 };
+    circuitBreakers.set(shardId, cb);
+  }
+  return cb;
+}
+
+/**
+ * Record a failure for a shard's circuit breaker
+ */
+function recordFailure(shardId: string): void {
+  const cb = getCircuitBreaker(shardId);
+  cb.failures++;
+  cb.lastFailureTime = Date.now();
+  if (cb.failures >= CIRCUIT_BREAKER_THRESHOLD) {
+    cb.state = 'open';
+  }
+}
+
+/**
+ * Record a success for a shard's circuit breaker
+ */
+function recordSuccess(shardId: string): void {
+  const cb = getCircuitBreaker(shardId);
+  cb.failures = 0;
+  cb.state = 'closed';
+}
+
+/**
+ * Check if circuit breaker allows a request
+ */
+function isCircuitOpen(shardId: string): boolean {
+  const cb = getCircuitBreaker(shardId);
+
+  if (cb.state === 'closed') {
+    return false;
+  }
+
+  if (cb.state === 'open') {
+    // Check if cooldown period has passed
+    const elapsed = Date.now() - cb.lastFailureTime;
+    if (elapsed >= CIRCUIT_BREAKER_COOLDOWN_MS) {
+      // Transition to half-open
+      cb.state = 'half-open';
+      return false; // Allow one test request
+    }
+    return true; // Still open
+  }
+
+  // Half-open: allow the request
+  return false;
+}
+
+// ============================================================================
+// Retry Logic Helpers
+// ============================================================================
+
+/**
+ * Default execution options
+ */
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_BACKOFF_MS = 10000;
+const DEFAULT_BASE_BACKOFF_MS = 100;
+
+/**
+ * Check if an error is transient and should be retried
+ */
+function isTransientError(error: unknown, statusCode?: number): boolean {
+  // HTTP 5xx errors (except 501 Not Implemented) are transient
+  if (statusCode !== undefined) {
+    if (statusCode >= 500 && statusCode !== 501) {
+      return true;
+    }
+    // 4xx errors are not transient
+    if (statusCode >= 400 && statusCode < 500) {
+      return false;
+    }
+  }
+
+  // Network/timeout errors are transient
+  if (error instanceof Error) {
+    const msg = error.message.toLowerCase();
+    if (msg.includes('timed out') ||
+        msg.includes('timeout') ||
+        msg.includes('network') ||
+        msg.includes('connection') ||
+        msg.includes('econnrefused') ||
+        msg.includes('econnreset')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Calculate exponential backoff delay with jitter
+ */
+function calculateBackoff(
+  attempt: number,
+  baseMs: number,
+  maxMs: number
+): number {
+  // Exponential backoff: base * 2^attempt
+  const exponentialDelay = baseMs * Math.pow(2, attempt);
+  // Add jitter (0-10% of delay) BEFORE capping
+  const jitter = Math.random() * 0.1 * exponentialDelay;
+  const withJitter = exponentialDelay + jitter;
+  // Cap at maximum AFTER jitter
+  return Math.min(withJitter, maxMs);
+}
+
+/**
+ * Sleep for a specified duration
+ * Uses queueMicrotask for zero delays to work with fake timers
+ */
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return new Promise(resolve => queueMicrotask(resolve));
+  }
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Create a timeout promise
+ */
+function createTimeout(ms: number): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Step execution timed out')), ms);
+  });
+}
+
+// ============================================================================
 // Step Execution
 // ============================================================================
 
 /**
- * Execute a single query step against a shard
+ * Execute a single query step against a shard with retry and timeout support
  */
 export async function executeStep(
   step: QueryStep,
-  shardStub: DurableObjectStub
+  shardStub: DurableObjectStub,
+  options?: StepExecutionOptions
 ): Promise<Entity[]> {
+  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxBackoffMs = options?.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+  const baseBackoffMs = options?.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
+
+  // Build URL based on step type
   let url: string;
 
   switch (step.type) {
@@ -318,44 +563,108 @@ export async function executeStep(
       );
   }
 
-  const response = await shardStub.fetch(new Request(url));
+  // Retry loop with exponential backoff
+  let lastError: Error | undefined;
+  let attempt = 0;
 
-  if (!response.ok) {
-    const statusText = response.statusText || 'Unknown error';
-    throw new Error(
-      `Shard request failed for shard "${step.shardId}": HTTP ${response.status} ${statusText}. ` +
-      `Step type: ${step.type}, predicate: ${step.predicate ?? 'none'}`
-    );
-  }
+  while (attempt <= maxRetries) {
+    try {
+      // Execute with timeout
+      const fetchPromise = (async () => {
+        const response = await shardStub.fetch(new Request(url));
 
-  const rawData = await response.json();
+        if (!response.ok) {
+          // Try to extract error details from response body
+          let errorCode = 'SHARD_UNAVAILABLE';
+          let errorMessage = response.statusText || 'Unknown error';
+          try {
+            const errorBody = await response.json();
+            if (errorBody && typeof errorBody === 'object' && 'error' in errorBody) {
+              const errObj = errorBody.error as { code?: string; message?: string };
+              if (errObj.code) errorCode = errObj.code;
+              if (errObj.message) errorMessage = errObj.message;
+            }
+          } catch {
+            // Ignore JSON parse errors, use defaults
+          }
 
-  // Validate response structure
-  const validatedResponse = validateShardResponse<ShardEntityResponse[]>(rawData);
+          const error = new Error(
+            `Shard request failed for shard "${step.shardId}": [${errorCode}] ${errorMessage}. ` +
+            `Step type: ${step.type}, predicate: ${step.predicate ?? 'none'}`
+          );
+          // Attach status code and error code for retry decision and reporting
+          (error as Error & { statusCode?: number; errorCode?: string }).statusCode = response.status;
+          (error as Error & { statusCode?: number; errorCode?: string }).errorCode = errorCode;
+          throw error;
+        }
 
-  // Check for shard errors
-  if (isShardError(validatedResponse)) {
-    throw new Error(
-      `Shard error [${validatedResponse.error.code}]: ${validatedResponse.error.message}. ` +
-      `Shard: "${step.shardId}", step type: ${step.type}${step.predicate ? `, predicate: "${step.predicate}"` : ''}`
-    );
-  }
+        const rawData = await response.json();
 
-  const data = validatedResponse.data;
+        // Validate response structure
+        const validatedResponse = validateShardResponse<ShardEntityResponse[]>(rawData);
 
-  // Parse response into Entity objects
-  if (Array.isArray(data)) {
-    return data.map((item: ShardEntityResponse) => {
-      if (item.$id && item.$type && item.$context) {
-        return item as Entity;
+        // Check for shard errors
+        if (isShardError(validatedResponse)) {
+          throw new Error(
+            `Shard error [${validatedResponse.error.code}]: ${validatedResponse.error.message}. ` +
+            `Shard: "${step.shardId}", step type: ${step.type}${step.predicate ? `, predicate: "${step.predicate}"` : ''}`
+          );
+        }
+
+        const data = validatedResponse.data;
+
+        // Parse response into Entity objects
+        if (Array.isArray(data)) {
+          return data.map((item: ShardEntityResponse) => {
+            if (item.$id && item.$type && item.$context) {
+              return item as Entity;
+            }
+            // If raw entity data, wrap it with required fields
+            const id = createEntityId(item.$id ?? 'https://unknown');
+            return createEntity(id, item.$type ?? 'Unknown', {});
+          });
+        }
+
+        return [];
+      })();
+
+      // Race between fetch and timeout
+      const result = await Promise.race([
+        fetchPromise,
+        createTimeout(timeoutMs),
+      ]);
+
+      // Success - record it and return
+      recordSuccess(step.shardId);
+      return result;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const statusCode = (error as Error & { statusCode?: number }).statusCode;
+
+      // Record failure for circuit breaker
+      recordFailure(step.shardId);
+
+      // Check if error is retryable
+      if (!isTransientError(error, statusCode)) {
+        // Non-transient error - don't retry
+        throw lastError;
       }
-      // If raw entity data, wrap it with required fields
-      const id = createEntityId(item.$id ?? 'https://unknown');
-      return createEntity(id, item.$type ?? 'Unknown', {});
-    });
+
+      // Check if we have retries left
+      if (attempt >= maxRetries) {
+        break;
+      }
+
+      // Wait with exponential backoff before retry
+      const backoffMs = calculateBackoff(attempt, baseBackoffMs, maxBackoffMs);
+      await sleep(backoffMs);
+
+      attempt++;
+    }
   }
 
-  return [];
+  // All retries exhausted
+  throw lastError ?? new Error('Step execution failed after retries');
 }
 
 // ============================================================================
@@ -457,82 +766,617 @@ function createCursor(offset: number): string {
 }
 
 /**
+ * Error info for tracking partial failures
+ */
+interface StepError {
+  shardId: string;
+  code: string;
+  message: string;
+}
+
+/**
+ * Extract error info from an error
+ */
+function extractErrorInfo(error: unknown, shardId: string): StepError {
+  if (error instanceof Error) {
+    // First check for attached errorCode property
+    const errorCode = (error as Error & { errorCode?: string }).errorCode;
+    if (errorCode) {
+      return {
+        shardId,
+        code: errorCode,
+        message: error.message,
+      };
+    }
+    // Fall back to extracting from message
+    const codeMatch = error.message.match(/\[([A-Z_]+)\]/);
+    const code = codeMatch ? codeMatch[1] : 'UNKNOWN_ERROR';
+    return {
+      shardId,
+      code,
+      message: error.message,
+    };
+  }
+  return {
+    shardId,
+    code: 'UNKNOWN_ERROR',
+    message: String(error),
+  };
+}
+
+/**
+ * Execute a shard request with optional replica fallback
+ */
+async function executeWithReplicaFallback(
+  step: QueryStep,
+  getShardStub: (shardId: string) => DurableObjectStub,
+  options?: OrchestrateOptions
+): Promise<{ entities: Entity[]; latencyMs: number; usedReplica: boolean }> {
+  const startTime = Date.now();
+  const stub = getShardStub(step.shardId);
+
+  try {
+    const entities = await executeStep(step, stub);
+    return {
+      entities,
+      latencyMs: Date.now() - startTime,
+      usedReplica: false,
+    };
+  } catch (error) {
+    // Try replica if enabled
+    if (options?.useReplicaOnFailure && options?.replicaShards?.[step.shardId]) {
+      const replicaShardId = options.replicaShards[step.shardId];
+      const replicaStub = getShardStub(replicaShardId);
+      const replicaStep = { ...step, shardId: replicaShardId };
+
+      const entities = await executeStep(replicaStep, replicaStub);
+      return {
+        entities,
+        latencyMs: Date.now() - startTime,
+        usedReplica: true,
+      };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Execute steps with concurrency limit using a semaphore pattern
+ */
+async function executeWithConcurrencyLimit<T>(
+  tasks: Array<() => Promise<T>>,
+  maxConcurrency: number
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let currentIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (currentIndex < tasks.length) {
+      const index = currentIndex++;
+      const task = tasks[index];
+      if (task) {
+        results[index] = await task();
+      }
+    }
+  }
+
+  // Create worker pool
+  const workerCount = Math.min(maxConcurrency, tasks.length);
+  const workers = Array.from({ length: workerCount }, () => worker());
+  await Promise.all(workers);
+
+  return results;
+}
+
+/**
+ * Merge results using union strategy (combine all unique entities)
+ */
+function mergeUnion(resultSets: Entity[][]): Entity[] {
+  const seen = new Set<string>();
+  const merged: Entity[] = [];
+
+  for (const results of resultSets) {
+    for (const entity of results) {
+      if (!seen.has(entity.$id)) {
+        seen.add(entity.$id);
+        merged.push(entity);
+      }
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Merge results using intersection strategy (only entities present in all sets)
+ */
+function mergeIntersection(resultSets: Entity[][]): Entity[] {
+  if (resultSets.length === 0) return [];
+  if (resultSets.length === 1) return resultSets[0] ?? [];
+
+  // Get IDs from first set
+  const firstSet = resultSets[0] ?? [];
+  const idCounts = new Map<string, { count: number; entity: Entity }>();
+
+  for (const entity of firstSet) {
+    idCounts.set(entity.$id, { count: 1, entity });
+  }
+
+  // Count occurrences in other sets
+  for (let i = 1; i < resultSets.length; i++) {
+    const seenInThisSet = new Set<string>();
+    const resultSet = resultSets[i] ?? [];
+    for (const entity of resultSet) {
+      if (idCounts.has(entity.$id) && !seenInThisSet.has(entity.$id)) {
+        const entry = idCounts.get(entity.$id)!;
+        entry.count++;
+        seenInThisSet.add(entity.$id);
+      }
+    }
+  }
+
+  // Return only entities present in all sets
+  const result: Entity[] = [];
+  for (const { count, entity } of idCounts.values()) {
+    if (count === resultSets.length) {
+      result.push(entity);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Merge results using ordered strategy (sort by a field)
+ */
+function mergeOrdered(
+  resultSets: Entity[][],
+  orderBy: string,
+  direction: 'asc' | 'desc'
+): Entity[] {
+  // Flatten all results
+  const all: Entity[] = [];
+  for (const results of resultSets) {
+    all.push(...results);
+  }
+
+  // Deduplicate by $id, keeping first occurrence
+  const seen = new Set<string>();
+  const unique: Entity[] = [];
+  for (const entity of all) {
+    if (!seen.has(entity.$id)) {
+      seen.add(entity.$id);
+      unique.push(entity);
+    }
+  }
+
+  // Sort by the specified field
+  unique.sort((a, b) => {
+    const aVal = (a as Record<string, unknown>)[orderBy];
+    const bVal = (b as Record<string, unknown>)[orderBy];
+
+    if (typeof aVal === 'number' && typeof bVal === 'number') {
+      return direction === 'asc' ? aVal - bVal : bVal - aVal;
+    }
+
+    const aStr = String(aVal ?? '');
+    const bStr = String(bVal ?? '');
+    return direction === 'asc'
+      ? aStr.localeCompare(bStr)
+      : bStr.localeCompare(aStr);
+  });
+
+  return unique;
+}
+
+/**
+ * Deduplicate entities by $id, optionally preferring newer versions
+ */
+function deduplicateEntities(
+  entities: Entity[],
+  deduplicateBy?: string,
+  preferNewer?: boolean
+): Entity[] {
+  const byId = new Map<string, Entity>();
+
+  for (const entity of entities) {
+    const existing = byId.get(entity.$id);
+    if (!existing) {
+      byId.set(entity.$id, entity);
+    } else if (deduplicateBy) {
+      const existingVal = (existing as Record<string, unknown>)[deduplicateBy];
+      const newVal = (entity as Record<string, unknown>)[deduplicateBy];
+
+      if (typeof existingVal === 'number' && typeof newVal === 'number') {
+        if (preferNewer && newVal > existingVal) {
+          byId.set(entity.$id, entity);
+        } else if (!preferNewer && newVal < existingVal) {
+          byId.set(entity.$id, entity);
+        }
+      }
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
+/**
+ * Apply quorum consistency - find values that majority agree on
+ */
+function applyQuorumConsistency(
+  resultSets: Entity[][],
+  quorumSize: number
+): Entity[] {
+  // Group entities by $id across all result sets
+  const byId = new Map<string, Map<string, { entity: Entity; count: number }>>();
+
+  for (const results of resultSets) {
+    for (const entity of results) {
+      if (!byId.has(entity.$id)) {
+        byId.set(entity.$id, new Map());
+      }
+      const variations = byId.get(entity.$id)!;
+
+      // Create a hash of the entity's content (excluding $id, $type, $context)
+      const contentHash = JSON.stringify(
+        Object.entries(entity)
+          .filter(([key]) => !key.startsWith('$'))
+          .sort(([a], [b]) => a.localeCompare(b))
+      );
+
+      if (variations.has(contentHash)) {
+        variations.get(contentHash)!.count++;
+      } else {
+        variations.set(contentHash, { entity, count: 1 });
+      }
+    }
+  }
+
+  // Find entities where quorum is reached
+  const result: Entity[] = [];
+  const failed: string[] = [];
+
+  for (const [id, variations] of byId) {
+    let foundQuorum = false;
+    for (const { entity, count } of variations.values()) {
+      if (count >= quorumSize) {
+        result.push(entity);
+        foundQuorum = true;
+        break;
+      }
+    }
+    if (!foundQuorum) {
+      failed.push(id);
+    }
+  }
+
+  // If any entity failed to reach quorum, throw
+  if (failed.length > 0) {
+    throw new Error('Quorum not reached');
+  }
+
+  return result;
+}
+
+/**
+ * Calculate aggregation from entities
+ */
+function calculateAggregation(
+  entities: Entity[],
+  config: AggregationConfig
+): number {
+  const values: number[] = [];
+
+  for (const entity of entities) {
+    const val = (entity as Record<string, unknown>)[config.field];
+    if (typeof val === 'number') {
+      values.push(val);
+    }
+  }
+
+  if (values.length === 0) return 0;
+
+  switch (config.type) {
+    case 'sum':
+      return values.reduce((a, b) => a + b, 0);
+    case 'avg':
+      return values.reduce((a, b) => a + b, 0) / values.length;
+    case 'min':
+      return Math.min(...values);
+    case 'max':
+      return Math.max(...values);
+    case 'count':
+      return values.length;
+    default:
+      return 0;
+  }
+}
+
+/**
  * Orchestrate a full query execution across shards
  *
  * @param plan - The query execution plan
  * @param getShardStub - Function to get a shard stub by ID
- * @param options - Optional pagination options (cursor and limit)
+ * @param options - Optional orchestration options
  */
 export async function orchestrateQuery(
   plan: QueryPlan,
   getShardStub: (shardId: string) => DurableObjectStub,
-  options?: PaginationOptions
+  options?: OrchestrateOptions
 ): Promise<QueryResult> {
   const startTime = Date.now();
   const limit = options?.limit ?? DEFAULT_LIMIT;
   const offset = parseCursor(options?.cursor);
+  const allowPartialResults = options?.allowPartialResults ?? false;
+  const totalTimeoutMs = options?.totalTimeoutMs;
 
   let shardQueries = 0;
   let entitiesScanned = 0;
+  let cancelled = false;
+  const shardLatencies: Record<string, number> = {};
+  let aggregatedValue: number | undefined;
+
+  // Track failures for partial results
+  const failedShards: string[] = [];
+  const errors: StepError[] = [];
+
+  // Step execution options - reduce retries when allowPartialResults is set
+  const stepOptions: StepExecutionOptions = allowPartialResults
+    ? { maxRetries: 0 }
+    : {};
+
+  // Helper to check total timeout
+  const checkTimeout = () => {
+    if (totalTimeoutMs !== undefined && Date.now() - startTime >= totalTimeoutMs) {
+      cancelled = true;
+      throw new Error('Query execution timed out');
+    }
+  };
+
+  // Handle read-your-writes consistency - wait for pending write
+  if (options?.consistency === 'read-your-writes' && options?.awaitPendingWrite) {
+    await sleep(60);
+  }
+
+  // Determine if we're doing parallel execution across multiple shards
+  const isParallelCrossShardQuery =
+    (options?.parallel || options?.broadcast || options?.mergeStrategy !== undefined ||
+     options?.consistency === 'quorum' || options?.aggregation !== undefined ||
+     options?.earlyTermination || options?.deduplicate) &&
+    plan.steps.length > 1 &&
+    plan.steps.every(s => s.type === 'lookup');
+
   let currentEntities: Entity[] = [];
 
-  // Execute steps sequentially, passing results between steps
-  for (const step of plan.steps) {
-    const stub = getShardStub(step.shardId);
+  if (isParallelCrossShardQuery) {
+    // Parallel execution across shards with early termination support
+    const maxConcurrency = options?.maxConcurrency ?? 10;
+    const earlyTermination = options?.earlyTermination ?? false;
+    const resultLimit = options?.limit ?? DEFAULT_LIMIT;
 
-    // For traverse/expand steps, use previous results as input
-    if ((step.type === 'traverse' || step.type === 'expand') && currentEntities.length > 0) {
-      // Execute for each entity from previous step
-      const results: Entity[] = [];
+    // For early termination, we execute sequentially to check limits
+    if (earlyTermination) {
+      const allResults: Entity[][] = [];
 
-      if (step.type === 'expand' && step.depth) {
-        // Handle depth-limited expansion
-        let depthCount = 0;
-        let frontier = currentEntities;
+      for (const step of plan.steps) {
+        if (cancelled) break;
+        checkTimeout();
 
-        while (depthCount < step.depth && frontier.length > 0) {
-          const nextFrontier: Entity[] = [];
-
-          for (const entity of frontier) {
-            const modifiedStep: QueryStep = {
-              ...step,
-              type: 'traverse',
-              entityIds: [entity.$id],
-            };
-
-            const stepResults = await executeStep(modifiedStep, stub);
-            shardQueries++;
-            entitiesScanned += stepResults.length;
-            nextFrontier.push(...stepResults);
-          }
-
-          results.push(...nextFrontier);
-          frontier = nextFrontier;
-          depthCount++;
-        }
-      } else {
-        // Regular traverse
-        for (const entity of currentEntities) {
-          const modifiedStep: QueryStep = {
-            ...step,
-            entityIds: [entity.$id],
-          };
-
-          const stepResults = await executeStep(modifiedStep, stub);
+        try {
+          const result = await executeWithReplicaFallback(step, getShardStub, options);
+          shardLatencies[step.shardId] = result.latencyMs;
           shardQueries++;
-          entitiesScanned += stepResults.length;
-          results.push(...stepResults);
+          entitiesScanned += result.entities.length;
+          allResults.push(result.entities);
+
+          // Count total entities so far
+          const totalSoFar = allResults.reduce((sum, r) => sum + r.length, 0);
+          if (totalSoFar >= resultLimit) {
+            break; // Early termination
+          }
+        } catch (error) {
+          shardQueries++;
+          if (allowPartialResults) {
+            if (!failedShards.includes(step.shardId)) {
+              failedShards.push(step.shardId);
+            }
+            errors.push(extractErrorInfo(error, step.shardId));
+          } else {
+            throw error;
+          }
         }
       }
 
-      currentEntities = results;
+      // Merge results
+      currentEntities = mergeUnion(allResults);
     } else {
-      // Execute step directly
-      const results = await executeStep(step, stub);
-      shardQueries++;
-      entitiesScanned += results.length;
-      currentEntities = results;
+      // Full parallel execution
+      const tasks = plan.steps.map((step, index) => async () => {
+        const result = await executeWithReplicaFallback(step, getShardStub, options);
+        if (options?.trackShardHealth) {
+          shardLatencies[step.shardId] = result.latencyMs;
+        }
+        shardQueries++;
+        entitiesScanned += result.entities.length;
+        return { entities: result.entities, index };
+      });
+
+      const results = await executeWithConcurrencyLimit(tasks, maxConcurrency);
+
+      // Sort by index if preserveOrder is requested
+      if (options?.preserveOrder) {
+        results.sort((a, b) => a.index - b.index);
+      }
+
+      const resultSets = results.map(r => r.entities);
+
+      // Calculate aggregation BEFORE any deduplication/merging
+      // This allows aggregating duplicate entity values across shards
+      if (options?.aggregation) {
+        const allEntities = resultSets.flat();
+        aggregatedValue = calculateAggregation(allEntities, options.aggregation);
+      }
+
+      // Apply merge strategy
+      if (options?.consistency === 'quorum' && options?.quorumSize) {
+        currentEntities = applyQuorumConsistency(resultSets, options.quorumSize);
+      } else if (options?.mergeStrategy === 'intersection') {
+        currentEntities = mergeIntersection(resultSets);
+      } else if (options?.mergeStrategy === 'ordered' && options?.orderBy) {
+        currentEntities = mergeOrdered(
+          resultSets,
+          options.orderBy,
+          options.orderDirection ?? 'asc'
+        );
+      } else if (options?.deduplicate && options?.deduplicateBy) {
+        // When deduplicating with a specific field, concatenate all results
+        // and let the deduplication step handle merging
+        currentEntities = resultSets.flat();
+      } else {
+        // Default: union (or just concatenate for preserveOrder)
+        if (options?.preserveOrder) {
+          currentEntities = resultSets.flat();
+        } else {
+          currentEntities = mergeUnion(resultSets);
+        }
+      }
     }
+  } else {
+    // Sequential execution - existing logic for traverse/expand/filter chains
+    for (const step of plan.steps) {
+      if (cancelled) break;
+      checkTimeout();
+
+      // Check circuit breaker for this shard
+      if (isCircuitOpen(step.shardId)) {
+        const cbError = new Error(`Circuit breaker open for shard "${step.shardId}"`);
+        if (allowPartialResults) {
+          if (!failedShards.includes(step.shardId)) {
+            failedShards.push(step.shardId);
+          }
+          errors.push(extractErrorInfo(cbError, step.shardId));
+          continue;
+        } else {
+          throw cbError;
+        }
+      }
+
+      const stub = getShardStub(step.shardId);
+
+      // For traverse/expand steps, use previous results as input
+      if ((step.type === 'traverse' || step.type === 'expand') && currentEntities.length > 0) {
+        // Execute for each entity from previous step
+        const results: Entity[] = [];
+
+        if (step.type === 'expand' && step.depth) {
+          // Handle depth-limited expansion
+          let depthCount = 0;
+          let frontier = currentEntities;
+
+          while (depthCount < step.depth && frontier.length > 0 && !cancelled) {
+            checkTimeout();
+            const nextFrontier: Entity[] = [];
+
+            for (const entity of frontier) {
+              if (cancelled) break;
+              checkTimeout();
+
+              const modifiedStep: QueryStep = {
+                ...step,
+                type: 'traverse',
+                entityIds: [entity.$id],
+              };
+
+              try {
+                const stepResults = await executeStep(modifiedStep, stub, stepOptions);
+                shardQueries++;
+                entitiesScanned += stepResults.length;
+                nextFrontier.push(...stepResults);
+              } catch (error) {
+                shardQueries++;
+                if (allowPartialResults) {
+                  if (!failedShards.includes(step.shardId)) {
+                    failedShards.push(step.shardId);
+                  }
+                  errors.push(extractErrorInfo(error, step.shardId));
+                } else {
+                  throw error;
+                }
+              }
+            }
+
+            results.push(...nextFrontier);
+            frontier = nextFrontier;
+            depthCount++;
+          }
+        } else {
+          // Regular traverse
+          for (const entity of currentEntities) {
+            if (cancelled) break;
+            checkTimeout();
+
+            const modifiedStep: QueryStep = {
+              ...step,
+              entityIds: [entity.$id],
+            };
+
+            try {
+              const stepResults = await executeStep(modifiedStep, stub, stepOptions);
+              shardQueries++;
+              entitiesScanned += stepResults.length;
+              results.push(...stepResults);
+            } catch (error) {
+              shardQueries++;
+              if (allowPartialResults) {
+                if (!failedShards.includes(step.shardId)) {
+                  failedShards.push(step.shardId);
+                }
+                errors.push(extractErrorInfo(error, step.shardId));
+              } else {
+                throw error;
+              }
+            }
+          }
+        }
+
+        currentEntities = results;
+      } else {
+        // Execute step directly
+        try {
+          const result = await executeWithReplicaFallback(step, getShardStub, options);
+          if (options?.trackShardHealth) {
+            shardLatencies[step.shardId] = result.latencyMs;
+          }
+          shardQueries++;
+          entitiesScanned += result.entities.length;
+          currentEntities = [...currentEntities, ...result.entities];
+        } catch (error) {
+          shardQueries++;
+          if (allowPartialResults) {
+            if (!failedShards.includes(step.shardId)) {
+              failedShards.push(step.shardId);
+            }
+            errors.push(extractErrorInfo(error, step.shardId));
+          } else {
+            throw error;
+          }
+        }
+      }
+    }
+  }
+
+  // Apply deduplication if requested
+  if (options?.deduplicate) {
+    currentEntities = deduplicateEntities(
+      currentEntities,
+      options.deduplicateBy,
+      options.preferNewer
+    );
+  }
+
+  // Calculate aggregation if requested (and not already calculated in parallel path)
+  if (options?.aggregation && aggregatedValue === undefined) {
+    aggregatedValue = calculateAggregation(currentEntities, options.aggregation);
   }
 
   // Apply pagination with offset and limit
@@ -553,8 +1397,23 @@ export async function orchestrateQuery(
     },
   };
 
+  // Add partial failure info if any
+  if (failedShards.length > 0) {
+    result.stats.partialFailure = true;
+    result.stats.failedShards = failedShards;
+    result.stats.errors = errors;
+  }
+
   if (nextCursor !== undefined) {
     result.cursor = nextCursor;
+  }
+
+  if (aggregatedValue !== undefined) {
+    result.stats.aggregatedValue = aggregatedValue;
+  }
+
+  if (options?.trackShardHealth && Object.keys(shardLatencies).length > 0) {
+    result.stats.shardLatencies = shardLatencies;
   }
 
   return result;

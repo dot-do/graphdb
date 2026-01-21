@@ -86,7 +86,7 @@ describe('Antimeridian (International Date Line) Edge Cases', () => {
       // Little Diomede Island (USA): 65.75N, 168.95W
       // Big Diomede Island (Russia): 65.78N, 169.06W
       const usa = { lat: 65.75, lng: -168.95 };
-      const russia = { lat: 65.78, lng: 169.06 };
+      const russia = { lat: 65.78, lng: -169.06 };
 
       const distance = haversineDistance(usa, russia);
 

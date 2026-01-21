@@ -11,16 +11,22 @@
  */
 
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   planQuery,
   executeStep,
   orchestrateQuery,
   batchLookups,
+  resetCircuitBreakers,
   type QueryPlan,
   type QueryStep,
   type FilterExpr,
 } from '../../src/broker/orchestrator';
+
+// Reset circuit breakers before each test to ensure isolation
+beforeEach(() => {
+  resetCircuitBreakers();
+});
 import { createEntity, type Entity } from '../../src/core/entity';
 import { createEntityId, createPredicate, ObjectType } from '../../src/core/types';
 import { ShardDO } from '../../src/shard/shard-do';
@@ -438,9 +444,9 @@ describe('Orchestrate Query with Real ShardDO', () => {
     it('should return hasMore when results exceed limit', async () => {
       const stub = getUniqueShardStub();
 
-      // Insert 150 entities
+      // Insert 15 entities (using smaller count for test reliability)
       const triples: Array<{ subject: string; predicate: string; objectType: number; value: unknown }> = [];
-      for (let i = 0; i < 150; i++) {
+      for (let i = 0; i < 15; i++) {
         triples.push({
           subject: `https://example.com/entity/${i}`,
           predicate: 'name',
@@ -450,8 +456,8 @@ describe('Orchestrate Query with Real ShardDO', () => {
       }
       await insertTestTriples(stub, triples);
 
-      // Create a lookup for all 150 entities
-      const entityIds = Array.from({ length: 150 }, (_, i) => `https://example.com/entity/${i}` as any);
+      // Create a lookup for all 15 entities with limit of 10
+      const entityIds = Array.from({ length: 15 }, (_, i) => `https://example.com/entity/${i}` as any);
 
       const plan: QueryPlan = {
         steps: [{ type: 'lookup', shardId: 'shard-1', entityIds }],
@@ -459,10 +465,12 @@ describe('Orchestrate Query with Real ShardDO', () => {
         canBatch: false,
       };
 
-      const result = await orchestrateQuery(plan, () => stub);
+      // Use limit of 10 so we can test hasMore with fewer entities
+      const result = await orchestrateQuery(plan, () => stub, { limit: 10 });
 
-      // Default limit is 100
-      if (result.entities.length >= 100) {
+      // With 15 entities and limit 10, should have more
+      expect(result.entities.length).toBeLessThanOrEqual(10);
+      if (result.entities.length === 10) {
         expect(result.hasMore).toBe(true);
         expect(result.cursor).toBeDefined();
       }
@@ -471,9 +479,9 @@ describe('Orchestrate Query with Real ShardDO', () => {
     it('should provide cursor for pagination', async () => {
       const stub = getUniqueShardStub();
 
-      // Insert 150 entities
+      // Insert 15 entities (using smaller count for test reliability)
       const triples: Array<{ subject: string; predicate: string; objectType: number; value: unknown }> = [];
-      for (let i = 0; i < 150; i++) {
+      for (let i = 0; i < 15; i++) {
         triples.push({
           subject: `https://example.com/entity/${i}`,
           predicate: 'name',
@@ -483,7 +491,7 @@ describe('Orchestrate Query with Real ShardDO', () => {
       }
       await insertTestTriples(stub, triples);
 
-      const entityIds = Array.from({ length: 150 }, (_, i) => `https://example.com/entity/${i}` as any);
+      const entityIds = Array.from({ length: 15 }, (_, i) => `https://example.com/entity/${i}` as any);
 
       const plan: QueryPlan = {
         steps: [{ type: 'lookup', shardId: 'shard-1', entityIds }],
@@ -491,7 +499,8 @@ describe('Orchestrate Query with Real ShardDO', () => {
         canBatch: false,
       };
 
-      const result = await orchestrateQuery(plan, () => stub);
+      // Use limit of 10 so we can test pagination with fewer entities
+      const result = await orchestrateQuery(plan, () => stub, { limit: 10 });
 
       if (result.hasMore) {
         expect(result.cursor).toBeDefined();

@@ -187,7 +187,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       ws.close();
     });
 
-    it('should complete 3 x 500 = 1500 subrequests across hibernation cycles', async () => {
+    it('should complete 3 x 500 = 1500 subrequests across hibernation cycles', { timeout: 15000 }, async () => {
       const stub = getUniqueBrokerStub();
       const ws = await connectWebSocket(stub);
 

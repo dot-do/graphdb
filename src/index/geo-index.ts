@@ -172,6 +172,10 @@ export function computeGeohashForTriple(sql: SqlStorage, tripleId: number, lat: 
  * Uses the haversine formula to calculate the great-circle distance
  * between two points on a sphere given their longitudes and latitudes.
  *
+ * Correctly handles:
+ * - Antimeridian (International Date Line) crossing
+ * - Polar coordinates where all longitudes converge
+ *
  * @param p1 - First point
  * @param p2 - Second point
  * @returns Distance in kilometers
@@ -181,7 +185,19 @@ export function haversineDistance(p1: GeoPoint, p2: GeoPoint): number {
   const lat1 = (p1.lat * Math.PI) / 180;
   const lat2 = (p2.lat * Math.PI) / 180;
   const dLat = ((p2.lat - p1.lat) * Math.PI) / 180;
-  const dLng = ((p2.lng - p1.lng) * Math.PI) / 180;
+
+  // Calculate longitude difference, handling antimeridian crossing
+  // We want the shortest path around the globe
+  let dLngDeg = p2.lng - p1.lng;
+
+  // Normalize to [-180, 180] to always take the shorter path
+  if (dLngDeg > 180) {
+    dLngDeg -= 360;
+  } else if (dLngDeg < -180) {
+    dLngDeg += 360;
+  }
+
+  const dLng = (dLngDeg * Math.PI) / 180;
 
   // Haversine formula
   const a =

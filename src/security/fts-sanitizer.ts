@@ -44,7 +44,7 @@ const MAX_TOKENS = 100;
 /**
  * SQL keywords that should be stripped to prevent injection
  */
-const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'UNION', 'EXEC', 'EXECUTE'];
+const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'TABLE', 'UNION', 'EXEC', 'EXECUTE', 'CREATE', 'ALTER', 'TRUNCATE'];
 
 /**
  * SQL comment patterns
@@ -70,6 +70,66 @@ const ZERO_WIDTH_CHARS = /[\u200B-\u200F\u202A-\u202E\uFEFF\u00AD]/g;
  * Null bytes
  */
 const NULL_BYTES = /\x00/g;
+
+/**
+ * Common diacritics/accented character mappings to ASCII equivalents.
+ * This enables searches to match content regardless of accent usage.
+ */
+const DIACRITICS_MAP: Record<string, string> = {
+  'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'ã': 'a', 'å': 'a', 'ā': 'a', 'ă': 'a', 'ą': 'a',
+  'Á': 'A', 'À': 'A', 'Â': 'A', 'Ä': 'A', 'Ã': 'A', 'Å': 'A', 'Ā': 'A', 'Ă': 'A', 'Ą': 'A',
+  'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'ē': 'e', 'ė': 'e', 'ę': 'e', 'ě': 'e',
+  'É': 'E', 'È': 'E', 'Ê': 'E', 'Ë': 'E', 'Ē': 'E', 'Ė': 'E', 'Ę': 'E', 'Ě': 'E',
+  'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i', 'į': 'i', 'ı': 'i',
+  'Í': 'I', 'Ì': 'I', 'Î': 'I', 'Ï': 'I', 'Ī': 'I', 'Į': 'I', 'İ': 'I',
+  'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'õ': 'o', 'ø': 'o', 'ō': 'o', 'ő': 'o',
+  'Ó': 'O', 'Ò': 'O', 'Ô': 'O', 'Ö': 'O', 'Õ': 'O', 'Ø': 'O', 'Ō': 'O', 'Ő': 'O',
+  'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ū': 'u', 'ů': 'u', 'ű': 'u', 'ų': 'u',
+  'Ú': 'U', 'Ù': 'U', 'Û': 'U', 'Ü': 'U', 'Ū': 'U', 'Ů': 'U', 'Ű': 'U', 'Ų': 'U',
+  'ý': 'y', 'ÿ': 'y', 'ŷ': 'y',
+  'Ý': 'Y', 'Ÿ': 'Y', 'Ŷ': 'Y',
+  'ñ': 'n', 'ń': 'n', 'ň': 'n', 'ņ': 'n',
+  'Ñ': 'N', 'Ń': 'N', 'Ň': 'N', 'Ņ': 'N',
+  'ç': 'c', 'ć': 'c', 'č': 'c', 'ĉ': 'c',
+  'Ç': 'C', 'Ć': 'C', 'Č': 'C', 'Ĉ': 'C',
+  'ß': 'ss',
+  'ś': 's', 'š': 's', 'ş': 's',
+  'Ś': 'S', 'Š': 'S', 'Ş': 'S',
+  'ź': 'z', 'ž': 'z', 'ż': 'z',
+  'Ź': 'Z', 'Ž': 'Z', 'Ż': 'Z',
+  'ł': 'l', 'ľ': 'l', 'ļ': 'l',
+  'Ł': 'L', 'Ľ': 'L', 'Ļ': 'L',
+  'ř': 'r', 'ŕ': 'r',
+  'Ř': 'R', 'Ŕ': 'R',
+  'ť': 't', 'ţ': 't',
+  'Ť': 'T', 'Ţ': 'T',
+  'đ': 'd', 'ď': 'd',
+  'Đ': 'D', 'Ď': 'D',
+  'ğ': 'g', 'ĝ': 'g',
+  'Ğ': 'G', 'Ĝ': 'G',
+  'ĥ': 'h',
+  'Ĥ': 'H',
+  'ĵ': 'j',
+  'Ĵ': 'J',
+  'ķ': 'k',
+  'Ķ': 'K',
+  'æ': 'ae', 'Æ': 'AE',
+  'œ': 'oe', 'Œ': 'OE',
+  'ð': 'd', 'Ð': 'D',
+  'þ': 'th', 'Þ': 'TH',
+};
+
+/**
+ * Pattern matching all diacritics characters in our map
+ */
+const DIACRITICS_PATTERN = new RegExp(`[${Object.keys(DIACRITICS_MAP).join('')}]`, 'g');
+
+/**
+ * Normalizes diacritics/accented characters to ASCII equivalents
+ */
+function normalizeDiacritics(text: string): string {
+  return text.replace(DIACRITICS_PATTERN, (char) => DIACRITICS_MAP[char] || char);
+}
 
 /**
  * Characters that are dangerous and should always be removed
@@ -146,6 +206,9 @@ export function sanitizeFtsQuery(query: string): string {
 
   // Step 2: Remove zero-width and invisible unicode characters
   sanitized = sanitized.replace(ZERO_WIDTH_CHARS, '');
+
+  // Step 2b: Normalize diacritics/accented characters to ASCII equivalents
+  sanitized = normalizeDiacritics(sanitized);
 
   // Step 3: Remove SQL comments (-- and /* */)
   sanitized = sanitized.replace(SQL_COMMENTS, ' ');
