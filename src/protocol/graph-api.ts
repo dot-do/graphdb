@@ -359,14 +359,14 @@ export interface GraphAPITargetOptions {
  * ```
  */
 export class GraphAPITarget extends RpcTarget implements GraphAPI {
-  /** In-memory entity store (ONLY available in test mode) */
-  #entities: Map<string, Entity> = new Map();
+  /** In-memory entity store (ONLY initialized in test mode) */
+  #entities: Map<string, Entity> | undefined;
 
-  /** In-memory triple store (ONLY available in test mode) */
-  #triples: ProtocolTriple[] = [];
+  /** In-memory triple store (ONLY initialized in test mode) */
+  #triples: ProtocolTriple[] | undefined;
 
-  /** Transaction counter (ONLY used in test mode) */
-  #txCounter = 0;
+  /** Transaction counter (ONLY initialized in test mode) */
+  #txCounter: number | undefined;
 
   /** Callback to get shard stub for orchestrator integration */
   #getShardStub: ((shardId: string) => DurableObjectStub) | undefined;
@@ -403,6 +403,14 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     if (this.#mode === 'production' && !this.#getShardStub) {
       // Allow construction without shard stub for lazy initialization,
       // but operations will fail at runtime if shard stub is not available
+    }
+
+    // Only initialize in-memory stores in test mode
+    // This prevents memory waste in production and ensures shard layer is used
+    if (this.#mode === 'test') {
+      this.#entities = new Map();
+      this.#triples = [];
+      this.#txCounter = 0;
     }
   }
 
@@ -446,7 +454,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     }
 
     // Test mode: use in-memory store
-    return this.#entities.get(id) ?? null;
+    return this.#entities!.get(id) ?? null;
   }
 
   async createEntity(entity: Entity): Promise<void> {
@@ -486,7 +494,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     }
 
     // Test mode: use in-memory store
-    if (this.#entities.has(idStr)) {
+    if (this.#entities!.has(idStr)) {
       throw new Error(
         `Entity creation failed: entity with ID "${idStr}" already exists. ` +
         `Use updateEntity() to modify existing entities, or deleteEntity() first to replace.`
@@ -510,17 +518,17 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
       }
     }
 
-    this.#entities.set(idStr, { ...storedEntity });
+    this.#entities!.set(idStr, { ...storedEntity });
 
     // Create triples for all properties
-    const txId = `tx-${++this.#txCounter}`;
+    const txId = `tx-${++this.#txCounter!}`;
     const timestamp = Date.now();
 
     for (const [key, value] of Object.entries(entity)) {
       if (key.startsWith('$') || key.startsWith('_')) continue;
 
       const objectType = this.#inferObjectType(value);
-      this.#triples.push({
+      this.#triples!.push({
         subject: idStr,
         predicate: key,
         objectType,
@@ -556,7 +564,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     }
 
     // Test mode: use in-memory store
-    const entity = this.#entities.get(id);
+    const entity = this.#entities!.get(id);
     if (!entity) {
       throw new Error(
         `Entity update failed: entity with ID "${id}" not found. ` +
@@ -568,14 +576,14 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     Object.assign(entity, props);
 
     // Update triples
-    const txId = `tx-${++this.#txCounter}`;
+    const txId = `tx-${++this.#txCounter!}`;
     const timestamp = Date.now();
 
     for (const [key, value] of Object.entries(props)) {
       if (key.startsWith('$') || key.startsWith('_')) continue;
 
       const objectType = this.#inferObjectType(value);
-      this.#triples.push({
+      this.#triples!.push({
         subject: id,
         predicate: key,
         objectType,
@@ -609,17 +617,17 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     }
 
     // Test mode: use in-memory store
-    if (!this.#entities.has(id)) {
+    if (!this.#entities!.has(id)) {
       throw new Error(
         `Entity deletion failed: entity with ID "${id}" not found. ` +
         `The entity may have already been deleted or never existed.`
       );
     }
 
-    this.#entities.delete(id);
+    this.#entities!.delete(id);
 
     // Remove all triples for this entity
-    this.#triples = this.#triples.filter(
+    this.#triples = this.#triples!.filter(
       (t) => t.subject !== id && t.objectValue !== id
     );
   }
@@ -657,13 +665,13 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     const results: Entity[] = [];
 
     // Find all triples matching subject and predicate
-    for (const triple of this.#triples) {
+    for (const triple of this.#triples!) {
       if (
         triple.subject === startId &&
         triple.predicate === predicate &&
         triple.objectType === ObjectType.REF
       ) {
-        const entity = this.#entities.get(triple.objectValue as string);
+        const entity = this.#entities!.get(triple.objectValue as string);
         if (entity) {
           // Apply filter if provided
           if (options?.filter && !this.#matchesFilter(entity, options.filter)) {
@@ -707,13 +715,13 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     const results: Entity[] = [];
 
     // Find all triples pointing to target
-    for (const triple of this.#triples) {
+    for (const triple of this.#triples!) {
       if (
         triple.objectValue === targetId &&
         triple.predicate === predicate &&
         triple.objectType === ObjectType.REF
       ) {
-        const entity = this.#entities.get(triple.subject);
+        const entity = this.#entities!.get(triple.subject);
         if (entity) {
           if (options?.filter && !this.#matchesFilter(entity, options.filter)) {
             continue;
@@ -764,7 +772,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
 
     // Test mode: use in-memory store
     if (path.length === 0) {
-      const entity = this.#entities.get(startId);
+      const entity = this.#entities!.get(startId);
       return entity ? [entity] : [];
     }
 
@@ -775,7 +783,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
       const nextIds: string[] = [];
 
       for (const id of currentIds) {
-        for (const triple of this.#triples) {
+        for (const triple of this.#triples!) {
           if (
             triple.subject === id &&
             triple.predicate === predicate &&
@@ -793,7 +801,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
     const results: Entity[] = [];
 
     for (const id of currentIds) {
-      const entity = this.#entities.get(id);
+      const entity = this.#entities!.get(id);
       if (entity) {
         if (options?.filter && !this.#matchesFilter(entity, options.filter)) {
           continue;
@@ -842,7 +850,7 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
 
     // Simple entity lookup (no traversal)
     if (path.length === 0) {
-      const entity = this.#entities.get(entityId);
+      const entity = this.#entities!.get(entityId);
       return {
         entities: entity ? [entity] : [],
         hasMore: false,
