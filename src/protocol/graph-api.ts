@@ -8,11 +8,12 @@
 import { RpcTarget } from 'capnweb';
 import type { Entity } from '../core/entity.js';
 import { resolveNamespace } from '../core/entity.js';
-import { ObjectType } from '../core/types.js';
+import { ObjectType, createEntityId } from '../core/types.js';
 import type { QueryResult } from '../broker/orchestrator.js';
 import { planQuery, orchestrateQuery } from '../broker/orchestrator.js';
 import { validateEntityId } from '../core/validation.js';
 import { parseQueryString } from './graph-api-executor.js';
+import { routeEntity } from '../snippet/router.js';
 
 // ============================================================================
 // Batch Size Limits (DoS Prevention)
@@ -1053,17 +1054,10 @@ export class GraphAPITarget extends RpcTarget implements GraphAPI {
   }
 
   /**
-   * Calculate shard ID for an entity using hash-based routing.
-   * Uses FNV-1a hash algorithm consistent with orchestrator.hashToShard().
+   * Calculate shard ID for an entity using the canonical router implementation.
+   * Delegates to routeEntity from router.ts for consistent shard assignment.
    */
   #getShardIdForEntity(entityId: string): string {
-    // Simple hash function matching orchestrator.ts hashToShard()
-    let hash = 0;
-    for (let i = 0; i < entityId.length; i++) {
-      const char = entityId.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32-bit integer
-    }
-    return `shard-${Math.abs(hash) % 16}`;
+    return routeEntity(createEntityId(entityId)).shardId;
   }
 }
