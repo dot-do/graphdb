@@ -13,8 +13,8 @@ import { createEntityId } from '../core/types';
 import type { Entity } from '../core/entity';
 import { createEntity } from '../core/entity';
 import { encodeString, toBase64 } from '../core/index';
-import { fnv1aHash } from '../core/hash';
 import { validateShardResponse, isShardError } from './response-validator';
+import { routeEntity } from '../snippet/router';
 
 // ============================================================================
 // Types
@@ -81,14 +81,14 @@ export interface PaginationOptions {
 // ============================================================================
 
 /**
- * Shard routing using FNV-1a hash for consistency with router.ts
+ * Get shard ID for an entity using the canonical router implementation.
  *
- * Uses the same fnv1aHash function from core/hash.ts to ensure
- * deterministic and consistent shard assignment across all code paths.
+ * Delegates to routeEntity from router.ts to ensure consistent
+ * shard assignment across all code paths. The router uses namespace-based
+ * routing with FNV-1a hash for deterministic shard selection.
  */
 function hashToShard(id: string): string {
-  const hash = fnv1aHash(id);
-  return `shard-${hash % 16}`;
+  return routeEntity(createEntityId(id)).shardId;
 }
 
 /**
