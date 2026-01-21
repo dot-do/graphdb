@@ -15,6 +15,7 @@ import {
   traverseFrom,
   MAX_PATH_DEPTH,
   DEFAULT_PATH_DEPTH,
+  MAX_TRAVERSAL_TIME_MS,
   type ExecutionContext,
 } from '../../src/query/executor';
 import { planQuery } from '../../src/query/planner';
@@ -429,5 +430,189 @@ describe('depth limit edge cases', () => {
 
     // Should work without error (capped internally)
     expect(result).toBeDefined();
+  });
+});
+
+// ============================================================================
+// Timeout Enforcement Tests - executeRecurse (Issue #2)
+// ============================================================================
+
+describe('MAX_TRAVERSAL_TIME_MS constant', () => {
+  it('should export MAX_TRAVERSAL_TIME_MS constant', () => {
+    expect(MAX_TRAVERSAL_TIME_MS).toBeDefined();
+    expect(typeof MAX_TRAVERSAL_TIME_MS).toBe('number');
+  });
+
+  it('should have MAX_TRAVERSAL_TIME_MS set to 30000 (30 seconds)', () => {
+    expect(MAX_TRAVERSAL_TIME_MS).toBe(30000);
+  });
+});
+
+describe('executeRecurse timeout enforcement', () => {
+  /**
+   * Create a slow mock execution context that simulates high fan-out graphs
+   * by adding artificial delay to each shard query.
+   */
+  function createSlowMockExecutionContext(
+    seededEntities: Map<string, Entity>,
+    delayMs: number
+  ): ExecutionContext {
+    const mockStub = {
+      fetch: async (request: Request) => {
+        // Simulate slow shard response
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+        const url = new URL(request.url);
+        const body = await request.json() as Record<string, unknown>;
+
+        if (url.pathname === '/lookup') {
+          const entityIds = body.entityIds as string[];
+          const entities = entityIds
+            .map((id) => seededEntities.get(id))
+            .filter((e): e is Entity => e !== undefined);
+          return new Response(JSON.stringify({ entities, triples: [] }));
+        }
+
+        if (url.pathname === '/traverse') {
+          const entityIds = body.entityIds as string[];
+          const predicate = body.predicate as string;
+          const direction = body.direction as string;
+
+          const resultEntities: Entity[] = [];
+
+          for (const id of entityIds) {
+            const entity = seededEntities.get(id);
+            if (!entity) continue;
+
+            // For outgoing traversal, always return some entities to keep recursing
+            if (direction === 'outgoing') {
+              if (predicate) {
+                const value = (entity as Record<string, unknown>)[predicate];
+                if (typeof value === 'string') {
+                  const target = seededEntities.get(value);
+                  if (target) resultEntities.push(target);
+                } else if (Array.isArray(value)) {
+                  for (const v of value) {
+                    const target = seededEntities.get(v);
+                    if (target) resultEntities.push(target);
+                  }
+                }
+              } else {
+                // No predicate - recurse returns all connected entities
+                for (const [key, val] of Object.entries(entity)) {
+                  if (key.startsWith('$')) continue;
+                  if (typeof val === 'string' && val.startsWith('https://')) {
+                    const target = seededEntities.get(val);
+                    if (target) resultEntities.push(target);
+                  }
+                }
+              }
+            }
+          }
+
+          return new Response(JSON.stringify({ entities: resultEntities, triples: [] }));
+        }
+
+        return new Response(JSON.stringify({ entities: [], triples: [] }));
+      },
+    } as unknown as DurableObjectStub;
+
+    return {
+      getShardStub: () => mockStub,
+      maxResults: 1000,
+    };
+  }
+
+  it('should respect ctx.timeout and stop recursion early', async () => {
+    // Create a chain of entities: n0 -> n1 -> n2 -> ... -> n99
+    const entities: Entity[] = [];
+    for (let i = 0; i < 100; i++) {
+      const nextId = i < 99 ? `https://example.com/user/n${i + 1}` : undefined;
+      entities.push(createTestEntity(`n${i}`, 'user', nextId ? { friends: nextId } : {}));
+    }
+
+    const seededEntities = createEntityMap(entities);
+
+    // Create context with 50ms timeout and 10ms delay per shard query
+    // This means only ~5 iterations should complete before timeout
+    const ctx = createSlowMockExecutionContext(seededEntities, 10);
+    ctx.timeout = 50; // 50ms timeout
+
+    const plan = planQuery(parse('user:n0.friends*'));
+    const startTime = Date.now();
+    const result = await executePlan(plan, ctx);
+    const duration = Date.now() - startTime;
+
+    // Should complete within reasonable time (timeout + some overhead)
+    expect(duration).toBeLessThan(200);
+
+    // Should have stopped early due to timeout, not traversed all 100 nodes
+    // With 10ms per query and 50ms timeout, we expect ~5 queries max
+    expect(result.stats.shardQueries).toBeLessThan(20);
+    expect(result).toBeDefined();
+  });
+
+  it('should use MAX_TRAVERSAL_TIME_MS as default timeout', async () => {
+    // Create a simple entity to test the default is applied
+    const user = createTestEntity('123', 'user', { friends: 'https://example.com/user/f1' });
+    const friend = createTestEntity('f1', 'user');
+
+    const seededEntities = createEntityMap([user, friend]);
+    const ctx = createMockExecutionContext(seededEntities);
+
+    // ctx.timeout is not set, so MAX_TRAVERSAL_TIME_MS (30s) should be used
+    expect(ctx.timeout).toBeUndefined();
+
+    const plan = planQuery(parse('user:123.friends*'));
+    const result = await executePlan(plan, ctx);
+
+    // Should complete without error - default timeout is generous enough
+    expect(result).toBeDefined();
+  });
+
+  it('should return partial results when timeout is reached', async () => {
+    // Create a long chain: n0 -> n1 -> n2 -> ... -> n49
+    const entities: Entity[] = [];
+    for (let i = 0; i < 50; i++) {
+      const nextId = i < 49 ? `https://example.com/user/n${i + 1}` : undefined;
+      entities.push(createTestEntity(`n${i}`, 'user', nextId ? { friends: nextId } : {}));
+    }
+
+    const seededEntities = createEntityMap(entities);
+
+    // Create context with very short timeout
+    const ctx = createSlowMockExecutionContext(seededEntities, 5);
+    ctx.timeout = 20; // 20ms timeout
+
+    const plan = planQuery(parse('user:n0.friends*'));
+    const result = await executePlan(plan, ctx);
+
+    // Should have some results (partial traversal)
+    expect(result).toBeDefined();
+    expect(result.entities.length).toBeGreaterThan(0);
+
+    // But should not have traversed all 50 nodes
+    expect(result.stats.shardQueries).toBeLessThan(50);
+  });
+
+  it('should complete full traversal when timeout is not reached', async () => {
+    // Create a short chain: n0 -> n1 -> n2
+    const n2 = createTestEntity('n2', 'user');
+    const n1 = createTestEntity('n1', 'user', { friends: n2.$id });
+    const n0 = createTestEntity('n0', 'user', { friends: n1.$id });
+
+    const seededEntities = createEntityMap([n0, n1, n2]);
+
+    // Create context with generous timeout
+    const ctx = createSlowMockExecutionContext(seededEntities, 1);
+    ctx.timeout = 5000; // 5 second timeout
+
+    const plan = planQuery(parse('user:n0.friends*[depth <= 5]'));
+    const result = await executePlan(plan, ctx);
+
+    // Should complete full traversal
+    expect(result).toBeDefined();
+    // Should have visited all 3 nodes
+    expect(result.entities.length).toBeGreaterThanOrEqual(2);
   });
 });

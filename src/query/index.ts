@@ -252,6 +252,11 @@ export {
    * @returns Entities that point to the target
    */
   traverseTo,
+  /**
+   * Maximum traversal time in milliseconds to prevent long-running queries
+   * on high fan-out graphs. Default: 30 seconds.
+   */
+  MAX_TRAVERSAL_TIME_MS,
 
   // Types
   type ExecutionContext,
