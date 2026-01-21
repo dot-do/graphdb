@@ -258,8 +258,8 @@ export function resolveNamespace(url: string): {
 
   const parsed = new URL(url);
 
-  // Namespace is just protocol + hostname
-  const namespace = createNamespace(`${parsed.protocol}//${parsed.hostname}`);
+  // Namespace is protocol + host (host includes port if present)
+  const namespace = createNamespace(`${parsed.protocol}//${parsed.host}`);
 
   // Path segments (filter out empty strings from leading/trailing slashes)
   const pathSegments = parsed.pathname.split('/').filter((s) => s !== '');
@@ -271,7 +271,7 @@ export function resolveNamespace(url: string): {
   if (parsed.pathname.endsWith('/') && parsed.pathname !== '/') {
     return {
       namespace,
-      context: `${parsed.protocol}//${parsed.hostname}${parsed.pathname.slice(0, -1)}`,
+      context: `${parsed.protocol}//${parsed.host}${parsed.pathname.slice(0, -1)}`,
       localId: '',
     };
   }
@@ -280,7 +280,7 @@ export function resolveNamespace(url: string): {
   if (pathSegments.length === 0) {
     return {
       namespace,
-      context: `${parsed.protocol}//${parsed.hostname}`,
+      context: `${parsed.protocol}//${parsed.host}`,
       localId: '',
     };
   }
@@ -288,14 +288,14 @@ export function resolveNamespace(url: string): {
   if (pathSegments.length === 1) {
     return {
       namespace,
-      context: `${parsed.protocol}//${parsed.hostname}`,
+      context: `${parsed.protocol}//${parsed.host}`,
       localId: pathSegments[0] ?? '',
     };
   }
 
   return {
     namespace,
-    context: `${parsed.protocol}//${parsed.hostname}/${pathSegments.slice(0, -1).join('/')}`,
+    context: `${parsed.protocol}//${parsed.host}/${pathSegments.slice(0, -1).join('/')}`,
     localId,
   };
 }

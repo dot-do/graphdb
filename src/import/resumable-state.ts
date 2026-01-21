@@ -59,6 +59,82 @@ export interface ResumableImportState {
 }
 
 // ============================================================================
+// Validation
+// ============================================================================
+
+/**
+ * Validates that a checkpoint has all required fields and correct structure.
+ *
+ * @param data - The data to validate
+ * @returns True if the data is a valid checkpoint, false otherwise
+ */
+function isValidCheckpoint(data: unknown): data is ImportCheckpoint {
+  if (data === null || typeof data !== 'object') {
+    return false;
+  }
+
+  const checkpoint = data as Record<string, unknown>;
+
+  // Check required fields exist and have correct types
+  if (typeof checkpoint.jobId !== 'string' || checkpoint.jobId.length === 0) {
+    return false;
+  }
+
+  if (typeof checkpoint.sourceUrl !== 'string') {
+    return false;
+  }
+
+  if (typeof checkpoint.byteOffset !== 'number') {
+    return false;
+  }
+
+  if (typeof checkpoint.linesProcessed !== 'number') {
+    return false;
+  }
+
+  if (typeof checkpoint.triplesWritten !== 'number') {
+    return false;
+  }
+
+  if (typeof checkpoint.checkpointedAt !== 'string') {
+    return false;
+  }
+
+  // Validate lineReaderState structure
+  if (!checkpoint.lineReaderState || typeof checkpoint.lineReaderState !== 'object') {
+    return false;
+  }
+
+  const lineReaderState = checkpoint.lineReaderState as Record<string, unknown>;
+  if (
+    typeof lineReaderState.bytesProcessed !== 'number' ||
+    typeof lineReaderState.linesEmitted !== 'number' ||
+    typeof lineReaderState.partialLine !== 'string'
+  ) {
+    return false;
+  }
+
+  // Validate batchWriterState structure
+  if (!checkpoint.batchWriterState || typeof checkpoint.batchWriterState !== 'object') {
+    return false;
+  }
+
+  const batchWriterState = checkpoint.batchWriterState as Record<string, unknown>;
+  if (
+    typeof batchWriterState.triplesWritten !== 'number' ||
+    typeof batchWriterState.chunksUploaded !== 'number' ||
+    typeof batchWriterState.bytesUploaded !== 'number' ||
+    !Array.isArray(batchWriterState.chunkInfos) ||
+    !batchWriterState.bloomState ||
+    typeof batchWriterState.bloomState !== 'object'
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+// ============================================================================
 // Implementation
 // ============================================================================
 
@@ -69,6 +145,7 @@ export interface ResumableImportState {
  * - Persists checkpoints to DO storage for durability
  * - Enables resume after timeout/restart
  * - Minimal overhead (~1KB per checkpoint)
+ * - Validates checkpoint structure on load
  *
  * @param storage Durable Object storage
  * @returns ResumableImportState instance
@@ -102,8 +179,21 @@ export function createResumableImportState(
   return {
     async loadCheckpoint(jobId: string): Promise<ImportCheckpoint | null> {
       const key = `${CHECKPOINT_PREFIX}${jobId}`;
-      const checkpoint = await storage.get<ImportCheckpoint>(key);
-      return checkpoint ?? null;
+      const data = await storage.get<unknown>(key);
+
+      if (data === undefined) {
+        return null;
+      }
+
+      // Validate checkpoint structure
+      if (!isValidCheckpoint(data)) {
+        console.warn(
+          `[ResumableImportState] Invalid checkpoint structure for job ${jobId}, returning null`
+        );
+        return null;
+      }
+
+      return data;
     },
 
     async saveCheckpoint(checkpoint: ImportCheckpoint): Promise<void> {

@@ -53,8 +53,18 @@ const SQL_COMMENTS = /--.*$|\/\*[\s\S]*?\*\//gm;
 
 /**
  * Zero-width and invisible unicode characters
+ * Includes:
+ * - Zero-width space (U+200B)
+ * - Zero-width non-joiner (U+200C)
+ * - Zero-width joiner (U+200D)
+ * - Zero-width no-break space (U+FEFF)
+ * - Soft hyphen (U+00AD)
+ * - RTL/LTR override and embedding characters (U+202A-U+202E)
+ * - Pop directional formatting (U+202C)
+ * - Right-to-left mark (U+200F)
+ * - Left-to-right mark (U+200E)
  */
-const ZERO_WIDTH_CHARS = /[\u200B-\u200D\uFEFF\u00AD]/g;
+const ZERO_WIDTH_CHARS = /[\u200B-\u200F\u202A-\u202E\uFEFF\u00AD]/g;
 
 /**
  * Null bytes
@@ -66,6 +76,19 @@ const NULL_BYTES = /\x00/g;
  * (excludes FTS5 syntax chars like " * ( ) that we want to preserve)
  */
 const DANGEROUS_CHARS = /['\{\}\[\];]/g;
+
+/**
+ * HTML-like tags pattern
+ * Strips anything that looks like an HTML tag: <...>
+ * This prevents XSS payloads in search queries
+ */
+const HTML_TAGS = /<[^>]*>/g;
+
+/**
+ * Event handler attributes pattern (for partially stripped HTML)
+ * Matches common XSS event handlers
+ */
+const EVENT_HANDLERS = /\b(on\w+)\s*=/gi;
 
 /**
  * Column filter pattern (e.g., column:term) - security risk
@@ -99,8 +122,9 @@ const LEADING_NEGATION = /(?:^|\s)-(?=\w)/g;
  *
  * This function removes/sanitizes:
  * - Null bytes
- * - Zero-width unicode characters
+ * - Zero-width and bidirectional unicode characters (RTL/LTR overrides)
  * - SQL comments (-- and /*)
+ * - HTML tags and event handlers (XSS prevention)
  * - SQL injection keywords
  * - Column filters (column:term)
  * - NEAR proximity operator
@@ -126,35 +150,41 @@ export function sanitizeFtsQuery(query: string): string {
   // Step 3: Remove SQL comments (-- and /* */)
   sanitized = sanitized.replace(SQL_COMMENTS, ' ');
 
-  // Step 4: Remove dangerous characters (but keep FTS5 syntax chars)
+  // Step 4: Remove HTML tags (XSS prevention)
+  sanitized = sanitized.replace(HTML_TAGS, ' ');
+
+  // Step 4b: Remove event handler patterns (XSS prevention)
+  sanitized = sanitized.replace(EVENT_HANDLERS, ' ');
+
+  // Step 6: Remove dangerous characters (but keep FTS5 syntax chars)
   sanitized = sanitized.replace(DANGEROUS_CHARS, ' ');
 
-  // Step 5: Remove column filter pattern (security risk)
+  // Step 7: Remove column filter pattern (security risk)
   sanitized = sanitized.replace(COLUMN_FILTER, ' ');
 
-  // Step 6: Remove NEAR proximity operator
+  // Step 8: Remove NEAR proximity operator
   sanitized = sanitized.replace(NEAR_PATTERN, ' ');
 
-  // Step 7: Remove start of field operator
+  // Step 9: Remove start of field operator
   sanitized = sanitized.replace(START_OF_FIELD, '');
 
-  // Step 8: Convert leading negation to space (use NOT instead)
+  // Step 10: Convert leading negation to space (use NOT instead)
   sanitized = sanitized.replace(LEADING_NEGATION, ' ');
 
-  // Step 9: Remove SQL keywords (but preserve FTS5 operators like AND, OR, NOT)
+  // Step 11: Remove SQL keywords (but preserve FTS5 operators like AND, OR, NOT)
   for (const keyword of SQL_KEYWORDS) {
     const regex = new RegExp(`\\b${keyword}\\b`, 'gi');
     sanitized = sanitized.replace(regex, ' ');
   }
 
-  // Step 10: Balance quotes - ensure even number of double quotes
+  // Step 12: Balance quotes - ensure even number of double quotes
   const quoteCount = (sanitized.match(/"/g) || []).length;
   if (quoteCount % 2 !== 0) {
     // Remove all quotes if unbalanced (safer than trying to fix)
     sanitized = sanitized.replace(/"/g, ' ');
   }
 
-  // Step 11: Balance parentheses
+  // Step 13: Balance parentheses
   let openParens = 0;
   let closeParens = 0;
   for (const char of sanitized) {
@@ -166,10 +196,10 @@ export function sanitizeFtsQuery(query: string): string {
     sanitized = sanitized.replace(/[()]/g, ' ');
   }
 
-  // Step 12: Normalize whitespace
+  // Step 14: Normalize whitespace
   sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
-  // Step 13: Limit total query length
+  // Step 15: Limit total query length
   if (sanitized.length > MAX_QUERY_LENGTH) {
     // Truncate at word boundary if possible
     const truncated = sanitized.slice(0, MAX_QUERY_LENGTH);
@@ -181,7 +211,7 @@ export function sanitizeFtsQuery(query: string): string {
     }
   }
 
-  // Step 14: Limit number of tokens (rough approximation)
+  // Step 16: Limit number of tokens (rough approximation)
   const tokens = sanitized.split(/\s+/);
   if (tokens.length > MAX_TOKENS) {
     sanitized = tokens.slice(0, MAX_TOKENS).join(' ');

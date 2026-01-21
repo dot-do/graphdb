@@ -793,6 +793,15 @@ function parseFilterValue(lexer: Lexer): FilterValue {
       return lexer.next().value;
     case TokenType.NUMBER:
       return parseFloat(lexer.next().value);
+    case TokenType.MINUS: {
+      // Handle negative numbers
+      lexer.next(); // consume the minus
+      const numToken = lexer.peek();
+      if (numToken.type !== TokenType.NUMBER) {
+        throw new ParseError(`Expected number after minus, got ${numToken.type}`, numToken.position, numToken);
+      }
+      return -parseFloat(lexer.next().value);
+    }
     case TokenType.TRUE:
       lexer.next();
       return true;

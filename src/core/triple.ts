@@ -211,7 +211,16 @@ function isValidDuration(value: string): boolean {
   if (!value || typeof value !== 'string') {
     return false;
   }
-  return ISO_8601_DURATION_PATTERN.test(value);
+  // Must match pattern and have at least one component (not just 'P' or 'PT')
+  if (!ISO_8601_DURATION_PATTERN.test(value)) {
+    return false;
+  }
+  // Check that duration has at least one actual component
+  // 'P' alone or 'PT' alone are invalid
+  if (value === 'P' || value === 'PT') {
+    return false;
+  }
+  return true;
 }
 
 /**

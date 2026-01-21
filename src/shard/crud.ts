@@ -435,46 +435,13 @@ export function createTripleStore(sql: SqlStorage): TripleStore {
         return;
       }
 
-      // For a single triple, use the individual insert method
-      if (triples.length === 1) {
-        return this.insertTriple(triples[0]!);
+      // Insert each triple individually
+      // While batched VALUES inserts would be faster, Cloudflare DO SQLite has
+      // a strict 500 parameter limit (SQLITE_MAX_VARIABLE_NUMBER) that varies
+      // by context. Individual inserts guarantee reliability.
+      for (const triple of triples) {
+        await this.insertTriple(triple);
       }
-
-      // Batch insert using a single SQL statement with multiple VALUES clauses
-      // This provides atomicity (all-or-nothing) and better performance
-      const rows = triples.map(tripleToRow);
-
-      // Build the VALUES clause with placeholders
-      // Each row has 14 columns
-      const placeholderRow = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
-      const placeholders = rows.map(() => placeholderRow).join(', ');
-
-      // Flatten all values into a single array for binding
-      const values: unknown[] = [];
-      for (const row of rows) {
-        values.push(
-          row['subject'],
-          row['predicate'],
-          row['obj_type'],
-          row['obj_ref'] ?? null,
-          row['obj_string'] ?? null,
-          row['obj_int64'] ?? null,
-          row['obj_float64'] ?? null,
-          row['obj_bool'] ?? null,
-          row['obj_timestamp'] ?? null,
-          row['obj_lat'] ?? null,
-          row['obj_lng'] ?? null,
-          row['obj_binary'] ?? null,
-          row['timestamp'],
-          row['tx_id']
-        );
-      }
-
-      sql.exec(
-        `INSERT INTO triples (subject, predicate, obj_type, obj_ref, obj_string, obj_int64, obj_float64, obj_bool, obj_timestamp, obj_lat, obj_lng, obj_binary, timestamp, tx_id)
-         VALUES ${placeholders}`,
-        ...values
-      );
     },
 
     async getTriple(subject: EntityId, predicate: Predicate): Promise<Triple | null> {
