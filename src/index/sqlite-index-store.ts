@@ -1423,7 +1423,12 @@ export class SQLiteIndexStore implements IndexStore {
       }
 
       return { nodeId, maxLayer, connections };
-    } catch {
+    } catch (error) {
+      console.error('[HNSW] Failed to load node:', {
+        nodeId,
+        predicate,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
