@@ -60,6 +60,16 @@ function getUniqueShardStub() {
 }
 
 /**
+ * Helper to properly close WebSocket and wait for DO storage operations to complete.
+ * This prevents "Isolated storage failed" errors that occur when a test ends
+ * before the DO has finished processing the WebSocket close event.
+ */
+async function closeWebSocket(ws: WebSocket, delayMs: number = 100): Promise<void> {
+  ws.close();
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+/**
  * Helper to establish WebSocket connection to BrokerDO
  */
 async function connectWebSocket(stub: DurableObjectStub): Promise<WebSocket> {
@@ -136,7 +146,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(connected.clientId).toBeDefined();
       expect(connected.clientId).toMatch(/^client_/);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should respond to ping with pong', async () => {
@@ -159,7 +169,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(pong.timestamp).toBe(timestamp);
       expect(pong.serverTime).toBeGreaterThanOrEqual(timestamp);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -184,7 +194,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(result.result.successCount).toBe(500);
       expect(result.result.failureCount).toBe(0);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should complete 3 x 500 = 1500 subrequests across hibernation cycles', { timeout: 15000 }, async () => {
@@ -217,7 +227,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(totalSuccess).toBe(1500);
       expect(totalFailure).toBe(0);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should exceed 1000 cumulative subrequests proving quota resets', async () => {
@@ -248,7 +258,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       // If quota didn't reset, we'd hit limit on message 4
       expect(totalSuccessful).toBe(1500);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -280,7 +290,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
 
       expect(getResult.value).toBe(42);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should preserve WebSocket attachment across message handlers', async () => {
@@ -304,7 +314,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
         expect(result.metrics.wakeNumber).toBe(i);
       }
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -383,7 +393,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       const totalSuccess = results.reduce((sum, r) => sum + r.result.successCount, 0);
       expect(totalSuccess).toBe(500); // 10 * 50
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should reject zero subrequests with validation error', async () => {
@@ -409,7 +419,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(result.details?.min).toBe(1);
       expect(result.details?.max).toBe(1000);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -460,7 +470,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
 
       expect(retrieveResult.cursor).toBe(testCursor);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should preserve cursor across multiple message handlers (hibernation cycles)', async () => {
@@ -509,7 +519,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
 
       expect(retrieveResult.cursor).toBe(testCursor);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should handle multiple cursors for different queries', async () => {
@@ -566,7 +576,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       );
       expect(result3.cursor).toBe(cursor3);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should clear cursor when requested', async () => {
@@ -603,7 +613,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
 
       expect(result.cursor).toBeUndefined();
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -631,7 +641,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(errorResponse.code).toBe('PARSE_ERROR');
       expect(errorResponse.message).toContain('Invalid JSON');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should reject oversized messages', async () => {
@@ -659,7 +669,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
       expect(errorResponse.code).toBe('SIZE_EXCEEDED');
       expect(errorResponse.message).toContain('exceeds maximum allowed size');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -688,7 +698,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
           );
         }
 
-        ws.close();
+        await closeWebSocket(ws);
       }
 
       // Verify metrics via HTTP endpoint (same stub, metrics should be in memory)
@@ -725,7 +735,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
           );
         }
 
-        ws.close();
+        await closeWebSocket(ws);
       }
 
       // Verify metrics persisted via HTTP
@@ -782,7 +792,7 @@ describe('BrokerDO Hibernating WebSocket Handler', () => {
         );
       }
 
-      ws.close();
+      await closeWebSocket(ws);
 
       // Verify rolling window via metrics endpoint
       const response = await stub.fetch('https://broker-do/metrics');

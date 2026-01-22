@@ -181,6 +181,19 @@ async function connectWebSocket(stub: DurableObjectStub): Promise<WebSocket> {
 }
 
 /**
+ * Helper to properly close WebSocket and wait for DO storage operations to complete.
+ * This prevents "Isolated storage failed" errors that occur when a test ends
+ * before the DO has finished processing the WebSocket close event.
+ *
+ * @see https://developers.cloudflare.com/workers/testing/vitest-integration/known-issues/#isolated-storage
+ */
+async function closeWebSocket(ws: WebSocket, delayMs: number = 100): Promise<void> {
+  ws.close();
+  // Wait for the close event to propagate and any storage operations to complete
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+/**
  * Wait for a specific message type from WebSocket
  */
 function waitForMessage<T>(
@@ -313,7 +326,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(response.shardId).toBe('shard-reg-test-1');
       expect(response.message).toBe('Registration successful');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should store registration in durable storage', async () => {
@@ -335,7 +348,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
         expect(shard?.lastSequence).toBe(50n);
       });
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -373,7 +386,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(shards.length).toBe(0);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should deregister shard on WebSocket close', async () => {
@@ -393,7 +406,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(shards.length).toBe(1);
 
       // Close WebSocket
-      ws.close();
+      await closeWebSocket(ws);
 
       // Poll until deregistered
       for (let i = 0; i < 20; i++) {
@@ -433,7 +446,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(stats.eventsBuffered + stats.eventsFlushed).toBeGreaterThanOrEqual(10);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should reject CDC events from unregistered shard', async () => {
@@ -454,7 +467,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(errorResponse.type).toBe('error');
       expect(errorResponse.message).toContain('not registered');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should reject out-of-order sequence numbers', async () => {
@@ -478,7 +491,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(error.type).toBe('error');
       expect(error.message).toContain('Out of order sequence');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should update shard sequence number after processing', async () => {
@@ -508,7 +521,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       const shard = shards.find((s) => s.shardId === 'shard-seq-update-test');
       expect(shard?.lastSequence).toBe('100');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -530,7 +543,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(errorResponse.type).toBe('error');
       expect(errorResponse.message).toContain('Invalid message');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should send error for unknown message type', async () => {
@@ -546,7 +559,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(errorResponse.type).toBe('error');
       expect(errorResponse.message).toContain('Unknown message type');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -627,7 +640,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(stats.flushCount).toBeGreaterThan(0);
       expect(stats.eventsFlushed).toBeGreaterThanOrEqual(1000);
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -653,7 +666,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(stats.flushCount).toBeGreaterThanOrEqual(1);
       expect(stats.eventsFlushed).toBe(50);
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -680,7 +693,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
         expect(shard?.lastSequence).toBe(100n);
       });
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
   });
@@ -712,7 +725,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(stats.eventsFlushed).toBeGreaterThanOrEqual(75);
 
-      ws.close();
+      await closeWebSocket(ws);
       // Wait for deregistration storage write to complete
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
@@ -738,7 +751,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(stats.bytesWritten).toBeGreaterThan(0);
 
-      ws.close();
+      await closeWebSocket(ws);
       // Wait for deregistration storage write to complete
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
@@ -881,7 +894,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
         expect(registrations[0]?.registeredAt).toBeGreaterThan(0);
       });
 
-      ws.close();
+      await closeWebSocket(ws);
       // Give time for WebSocket close to propagate
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
@@ -958,7 +971,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       );
       expect(stats2.eventsFlushed).toBeGreaterThanOrEqual(1);
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1008,7 +1021,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       );
       expect(stats.eventsFlushed).toBeGreaterThanOrEqual(1);
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1037,7 +1050,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(ack.sequence).toBe('50');
       expect(ack.eventsAcked).toBe(50);
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1072,7 +1085,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       const shard = shards.find((s) => s.shardId === 'shard-seq-inc-test');
       expect(shard?.lastSequence).toBe('50');
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
   });
@@ -1133,7 +1146,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(response.type).toBe('registered');
       expect(response.shardId).toBe('shard-binary-test');
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1150,7 +1163,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
           (m: unknown) => (m as { type?: string }).type === 'registered'
         );
 
-        ws.close();
+        await closeWebSocket(ws);
 
         // Small delay
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1201,7 +1214,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       expect(error1.type).toBe('error');
       expect(error1.message).toContain('Invalid');
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1225,7 +1238,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(error.type).toBe('error');
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1258,7 +1271,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       // Empty events should be processed but not add to buffer
       expect(stats.eventsBuffered).toBe(0);
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1286,7 +1299,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(error.type).toBe('error');
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 
@@ -1320,7 +1333,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       const shard = shards.find((s) => s.shardId === 'shard-dup-test');
       expect(shard?.lastSequence).toBe('100');
 
-      ws.close();
+      await closeWebSocket(ws);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
   });
@@ -1346,7 +1359,7 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       // Wait for flush to persist state
       await waitForStatsCondition(stub, (s) => s.eventsFlushed >= 100, 2000);
 
-      ws.close();
+      await closeWebSocket(ws);
 
       // Allow WebSocket close to propagate
       await new Promise((resolve) => setTimeout(resolve, 100));

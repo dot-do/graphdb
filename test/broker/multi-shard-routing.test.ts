@@ -45,6 +45,14 @@ interface SubrequestResult {
 }
 
 /**
+ * Helper to properly close WebSocket and wait for DO storage operations to complete.
+ */
+async function closeWebSocket(ws: WebSocket, delayMs: number = 100): Promise<void> {
+  ws.close();
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+/**
  * Helper to establish WebSocket connection to BrokerDO
  */
 async function connectWebSocket(stub: DurableObjectStub): Promise<WebSocket> {
@@ -129,7 +137,7 @@ describe('BrokerDO Multi-Shard Routing', () => {
       // The result should indicate which shard was used
       expect(result.result.shardId).toBe(expectedShardId);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should route different namespaces to different shards', async () => {
@@ -169,7 +177,7 @@ describe('BrokerDO Multi-Shard Routing', () => {
       expect(result1.result.shardId).toBe(expectedShard1);
       expect(result2.result.shardId).toBe(expectedShard2);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should route same namespace entities to the same shard', async () => {
@@ -205,7 +213,7 @@ describe('BrokerDO Multi-Shard Routing', () => {
       expect(result1.result.shardId).toBe(expectedShardId);
       expect(result2.result.shardId).toBe(expectedShardId);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should use routeEntity for entity-based routing', async () => {
@@ -229,7 +237,7 @@ describe('BrokerDO Multi-Shard Routing', () => {
 
       expect(result.result.shardId).toBe(routeInfo.shardId);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
 
     it('should NOT use hardcoded shard-node-1', async () => {
@@ -254,7 +262,7 @@ describe('BrokerDO Multi-Shard Routing', () => {
       expect(result.result.shardId).toMatch(/^shard-\d+-[a-f0-9]+$/);
       expect(result.result.shardId).not.toBe('shard-node-1');
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 
@@ -279,7 +287,7 @@ describe('BrokerDO Multi-Shard Routing', () => {
       expect(result.result.shardId).toBeDefined();
       expect(result.result.shardId).toMatch(/^shard-\d+-[a-f0-9]+$/);
 
-      ws.close();
+      await closeWebSocket(ws);
     });
   });
 });
