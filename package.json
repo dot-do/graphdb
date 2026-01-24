@@ -81,6 +81,10 @@
     "./observability": {
       "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
     }
   },
   "files": [
@@ -115,7 +119,9 @@
     "rdf",
     "knowledge-graph",
     "edge-computing",
-    "serverless"
+    "serverless",
+    "mcp",
+    "model-context-protocol"
   ],
   "license": "MIT",
   "repository": {
