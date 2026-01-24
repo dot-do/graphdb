@@ -681,6 +681,8 @@ describe('CDCCoordinatorDO', () => {
       const shard1 = shards.find((r) => r.shardId === 'shard-node-1');
       expect(shard1?.lastSequence).toBe('100');
 
+      // Cancel any pending alarms to prevent isolated storage failure
+      await cancelAlarms(stub);
       await closeWebSocket(ws);
     });
 
@@ -839,6 +841,8 @@ describe('CDCCoordinatorDO', () => {
 
       expect(stats.eventsBuffered + stats.eventsFlushed).toBeGreaterThanOrEqual(75);
 
+      // Cancel any pending alarms to prevent isolated storage failure
+      await cancelAlarms(stub);
       await closeWebSocket(ws);
     });
 

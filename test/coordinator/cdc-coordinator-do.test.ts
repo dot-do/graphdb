@@ -16,7 +16,7 @@
  */
 
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { CDCCoordinatorDO } from '../../src/coordinator/cdc-coordinator-do.js';
 import type { CoordinatorCDCStats } from '../../src/coordinator/cdc-coordinator-do.js';
 import type { CDCEvent } from '../../src/storage/cdc-types.js';
@@ -194,6 +194,16 @@ async function closeWebSocket(ws: WebSocket, delayMs: number = 100): Promise<voi
 }
 
 /**
+ * Helper to cancel any pending alarms on a DO to prevent isolated storage failures.
+ * Must be called before the test ends if the DO schedules alarms.
+ */
+async function cancelAlarms(stub: DurableObjectStub): Promise<void> {
+  await runInDurableObject(stub, async (_instance, state) => {
+    await state.storage.deleteAlarm();
+  });
+}
+
+/**
  * Wait for a specific message type from WebSocket
  */
 function waitForMessage<T>(
@@ -266,6 +276,13 @@ async function waitForStatsCondition(
 
 describe('CDCCoordinatorDO - Additional Tests', () => {
   const testNamespace = createNamespace('https://example.com/crm/acme');
+
+  // Allow time for any pending alarms to fire after the suite completes
+  // This prevents "Isolated storage failed" errors from CDC coordinator alarms
+  afterAll(async () => {
+    // Wait for the alarm timeout (100ms) plus buffer for processing
+    await new Promise(resolve => setTimeout(resolve, 300));
+  });
 
   // ==========================================================================
   // WebSocket Connection Tests
@@ -446,6 +463,8 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
 
       expect(stats.eventsBuffered + stats.eventsFlushed).toBeGreaterThanOrEqual(10);
 
+      // Cancel any pending alarms to prevent isolated storage failure
+      await cancelAlarms(stub);
       await closeWebSocket(ws);
     });
 
@@ -521,6 +540,8 @@ describe('CDCCoordinatorDO - Additional Tests', () => {
       const shard = shards.find((s) => s.shardId === 'shard-seq-update-test');
       expect(shard?.lastSequence).toBe('100');
 
+      // Cancel any pending alarms to prevent isolated storage failure
+      await cancelAlarms(stub);
       await closeWebSocket(ws);
     });
   });
