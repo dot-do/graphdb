@@ -5,8 +5,10 @@
  * to the `graph` binding for GraphDB operations.
  */
 
+import type { ToolResponse, DoResult } from '@dotdo/mcp'
+import type { DoInput } from '@dotdo/mcp/tools'
 import { createGraphBinding, GRAPH_BINDING_TYPES } from '../graph-binding.js'
-import type { GraphDBEnv, DoInput, ToolResponse, MCPAuthContext } from '../types.js'
+import type { GraphDBEnv, MCPAuthContext } from '../types.js'
 
 /**
  * Tool definition for the do tool
@@ -45,20 +47,10 @@ Examples:
 } as const
 
 /**
- * Result from code execution
+ * Result from code execution - uses shared DoResult from @dotdo/mcp
+ * { success, value?, logs, error?, duration }
  */
-export interface DoResult {
-  /** Whether execution succeeded */
-  success: boolean
-  /** Return value if successful */
-  value?: unknown
-  /** Console logs captured during execution */
-  logs: Array<{ level: string; message: string; timestamp: number }>
-  /** Error message if failed */
-  error?: string
-  /** Execution duration in milliseconds */
-  duration: number
-}
+export type { DoResult } from '@dotdo/mcp'
 
 /**
  * Simple sandboxed code execution

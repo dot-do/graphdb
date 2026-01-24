@@ -5,9 +5,10 @@
  * Supports SPARQL queries, graph traversal, and full-text search.
  */
 
+import type { ToolResponse } from '@dotdo/mcp'
 import type { AuthContext } from '../../security/auth.js'
 import { checkPermission } from '../../security/permissions.js'
-import type { GraphDBEnv, SearchInput, ToolResponse, MCPAuthContext } from '../types.js'
+import type { GraphDBEnv, SearchInput, MCPAuthContext } from '../types.js'
 
 /**
  * Tool definition for the search tool

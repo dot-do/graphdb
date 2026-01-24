@@ -5,6 +5,8 @@
  * Integrates with GraphDB's multi-layer authentication system.
  */
 
+import type { ToolResponse } from '@dotdo/mcp'
+import type { DoInput } from '@dotdo/mcp/tools'
 import { GRAPH_BINDING_TYPES } from './graph-binding.js'
 import {
   searchTool,
@@ -18,10 +20,8 @@ import type {
   GraphDBEnv,
   GraphDBMCPConfig,
   MCPAuthContext,
-  ToolResponse,
   SearchInput,
   FetchInput,
-  DoInput,
 } from './types.js'
 
 /**

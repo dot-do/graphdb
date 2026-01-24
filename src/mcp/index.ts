@@ -48,16 +48,25 @@ export {
   type MCPResponse,
 } from './server.js'
 
-// Types
+// Shared types from @dotdo/mcp (re-exported via types.ts)
+export type {
+  ToolResponse,
+  DoResult,
+  MCPAuthContext,
+  AuthMode,
+  DoInput,
+  Tool,
+  ToolHandler,
+  ToolRegistry,
+} from './types.js'
+
+// GraphDB-specific types
 export type {
   GraphBinding,
   GraphDBMCPConfig,
   GraphDBEnv,
-  MCPAuthContext,
-  ToolResponse,
   SearchInput,
   FetchInput,
-  DoInput,
   TraverseOptions,
   SearchOptions,
   VectorSearchOptions,
@@ -81,5 +90,4 @@ export {
   doTool,
   createDoHandler,
   getDoToolTypes,
-  type DoResult,
 } from './tools/index.js'

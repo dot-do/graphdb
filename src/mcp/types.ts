@@ -2,9 +2,18 @@
  * MCP Server Types for GraphDB
  *
  * Defines the types for the graph binding API exposed to MCP tools.
+ * Base types (ToolResponse, AuthContext, DoResult, DoInput) are imported from @dotdo/mcp.
+ * GraphDB-specific types (graph queries, traversal, SPARQL) are defined here.
  */
 
 import type { Entity } from '../core/entity.js'
+import type { AuthMode } from '@dotdo/mcp'
+
+// Re-export shared types from @dotdo/mcp
+export type { ToolResponse, DoResult } from '@dotdo/mcp'
+export type { AuthContext as MCPAuthContext, AuthMode } from '@dotdo/mcp'
+export type { DoInput } from '@dotdo/mcp/tools'
+export type { Tool, ToolHandler, ToolRegistry } from '@dotdo/mcp/tools'
 
 /**
  * Options for graph traversal operations
@@ -153,22 +162,9 @@ export interface GraphBinding {
 
 /**
  * MCP Auth context for GraphDB
- * Maps MCP auth to GraphDB's multi-layer auth
+ * Uses the shared AuthContext from @dotdo/mcp which has the same shape:
+ * { type, id, readonly, isAdmin?, token?, metadata? }
  */
-export interface MCPAuthContext {
-  /** MCP auth type */
-  type: 'anon' | 'oauth' | 'apikey'
-  /** User/client identifier */
-  id: string
-  /** Whether this is read-only access */
-  readonly: boolean
-  /** Admin privileges */
-  isAdmin?: boolean
-  /** Raw token */
-  token?: string
-  /** Additional metadata */
-  metadata?: Record<string, unknown>
-}
 
 /**
  * Configuration for the GraphDB MCP server
@@ -178,8 +174,8 @@ export interface GraphDBMCPConfig {
   env: GraphDBEnv
   /** Optional auth configuration */
   auth?: {
-    /** Authentication mode */
-    mode: 'anon' | 'anon+auth' | 'auth-required'
+    /** Authentication mode (uses shared AuthMode from @dotdo/mcp) */
+    mode: AuthMode
     /** OAuth introspection URL */
     oauthIntrospectionUrl?: string
     /** API key verification URL */
@@ -210,14 +206,6 @@ export interface GraphDBEnv {
 }
 
 /**
- * MCP tool response format
- */
-export interface ToolResponse {
-  content: Array<{ type: string; text: string }>
-  isError?: boolean
-}
-
-/**
  * Search tool input
  */
 export interface SearchInput {
@@ -244,9 +232,5 @@ export interface FetchInput {
 }
 
 /**
- * Do tool input
+ * Do tool input - uses shared DoInput from @dotdo/mcp ({ code: string })
  */
-export interface DoInput {
-  /** Code to execute */
-  code: string
-}

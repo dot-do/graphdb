@@ -5,10 +5,11 @@
  * Retrieves triples and entities by ID with optional relation expansion.
  */
 
+import type { ToolResponse } from '@dotdo/mcp'
 import type { Entity } from '../../core/entity.js'
 import type { AuthContext } from '../../security/auth.js'
 import { checkNamespaceAccess } from '../../security/permissions.js'
-import type { GraphDBEnv, FetchInput, ToolResponse, MCPAuthContext } from '../types.js'
+import type { GraphDBEnv, FetchInput, MCPAuthContext } from '../types.js'
 
 /**
  * Tool definition for the fetch tool
